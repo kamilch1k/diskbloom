@@ -2,6 +2,7 @@ package dev.diskbloom;
 
 import dev.diskbloom.core.Scanner;
 import dev.diskbloom.core.Scanner.Node;
+import dev.diskbloom.core.Sizes;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -11,7 +12,7 @@ import java.util.Comparator;
 /**
  * Headless runner for the scan engine: prints the biggest children of a path,
  * plus timing. `--selfcheck` runs an assert-based check of the aggregation.
- * The JavaFX UI will reuse Scanner directly; this stays as a quick CLI.
+ * The JavaFX UI reuses Scanner directly; this stays as a quick CLI.
  */
 public final class Main {
 
@@ -25,26 +26,14 @@ public final class Main {
         Node tree = Scanner.scan(root);
         long ms = (System.nanoTime() - t0) / 1_000_000;
 
-        System.out.printf("%s  -  %s total, scanned in %d ms%n", root, human(tree.size), ms);
+        System.out.printf("%s  -  %s total, scanned in %d ms%n", root, Sizes.human(tree.size), ms);
         int shown = 0;
         if (tree.children != null) {
             for (Node c : tree.children) {
-                System.out.printf("  %10s  %s%s%n", human(c.size), c.name, c.dir ? "\\" : "");
+                System.out.printf("  %10s  %s%s%n", Sizes.human(c.size), c.name, c.dir ? "\\" : "");
                 if (++shown >= 20) break;
             }
         }
-    }
-
-    static String human(long bytes) {
-        if (bytes < 1024) return bytes + " B";
-        String[] units = {"KB", "MB", "GB", "TB", "PB"};
-        double v = bytes;
-        int i = -1;
-        do {
-            v /= 1024;
-            i++;
-        } while (v >= 1024 && i < units.length - 1);
-        return String.format("%.1f %s", v, units[i]);
     }
 
     // ponytail: one runnable check for the non-trivial bit (size aggregation + ordering).

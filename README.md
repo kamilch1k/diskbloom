@@ -2,7 +2,9 @@
 
 A fast, open-source disk-space analyzer for Windows — see what's eating your drive, beautifully.
 
-> **Status:** early work in progress. The scan engine works; the GUI is next.
+> **Status:** early work in progress — the scan engine and a JavaFX treemap UI both work today.
+
+![diskbloom showing a squarified treemap of a folder](docs/screenshot.png)
 
 ## Why
 
@@ -21,24 +23,34 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 ## Roadmap
 
 - [x] Scan engine — zero-dependency recursive walk, size aggregation, largest-first (with a self-check)
-- [ ] JavaFX UI — pick a folder, scan off the UI thread, treemap visualization
+- [x] JavaFX UI — pick a folder, scan off the UI thread, squarified treemap with click-to-drill-down and hover details
 - [ ] Raw NTFS MFT reading via Win32 FFI for WizTree-class scan speed
 - [ ] Hardlink / junction-aware accuracy
 - [ ] Packaged installer (jpackage)
 
 ## Build & run
 
-Requires JDK 25+. The engine needs no JavaFX; the upcoming UI does, so a JavaFX-bundled build (e.g. [Liberica JDK "Full"](https://bell-sw.com/pages/downloads/)) is recommended.
+Requires JDK 25+ with JavaFX bundled — e.g. [Liberica JDK "Full"](https://bell-sw.com/pages/downloads/). The `--add-modules` flags assume JavaFX is in the runtime image.
+
+### GUI
 
 ```sh
-# compile
-javac -d out src/dev/diskbloom/core/Scanner.java src/dev/diskbloom/Main.java
+javac --add-modules javafx.controls,javafx.swing -d out $(find src -name "*.java")
+java  --add-modules javafx.controls,javafx.swing -cp out dev.diskbloom.Launcher
+# open straight to a folder:
+java  --add-modules javafx.controls,javafx.swing -cp out dev.diskbloom.Launcher "C:\Program Files"
+# export a treemap to PNG and exit:
+java "-Ddiskbloom.shot=out.png" --add-modules javafx.controls,javafx.swing -cp out dev.diskbloom.Launcher "C:\Program Files"
+```
 
-# scan a folder — prints the 20 biggest entries + timing
-java -cp out dev.diskbloom.Main "C:\Users\you\Downloads"
+On Windows, `diskbloom.cmd` compiles and launches the GUI for you (and the Desktop shortcut points at it).
 
-# run the self-check
-java -ea -cp out dev.diskbloom.Main --selfcheck
+### CLI / engine only
+
+```sh
+javac -d out src/dev/diskbloom/core/Sizes.java src/dev/diskbloom/core/Scanner.java src/dev/diskbloom/Main.java
+java -cp out dev.diskbloom.Main "C:\Users\you\Downloads"   # biggest 20 entries + timing
+java -ea -cp out dev.diskbloom.Main --selfcheck            # self-check
 ```
 
 ## License
