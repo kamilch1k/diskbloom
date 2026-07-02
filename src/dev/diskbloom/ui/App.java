@@ -42,20 +42,47 @@ import java.nio.file.Paths;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 
 /**
  * The diskbloom window: a folder tree scanned off the UI thread, shown as a
- * squarified treemap plus a sidebar (summary + largest-items list). Click a
- * tile or row to select; double-click to drill in.
+ * nested squarified treemap (folders = containers, files = leaves coloured by
+ * type) plus a sidebar (summary, type legend, largest-items list).
  *
  * Launch with -Ddiskbloom.shot=out.png to render one folder to a PNG and exit.
  */
 public class App extends Application {
 
     private static final String BG = "#1e1e1e", PANEL = "#252526", LINE = "#3a3a3a",
-            FG = "#e6e6e6", DIM = "#9a9a9a";
+            CONTAINER = "#242424", FG = "#e6e6e6", DIM = "#9a9a9a";
+    private static final int MAX_DEPTH = 6;
+    private static final double MIN_SUBDIV = 28, MIN_LEAF = 3;
+
+    // File-type categories drive both leaf colour and the legend.
+    private enum Cat {
+        VIDEO("Video", "#7f77dd"), IMAGE("Images", "#1d9e75"), AUDIO("Audio", "#d4537e"),
+        ARCHIVE("Archives", "#ba7517"), CODE("Code", "#378add"), DOC("Documents", "#639922"),
+        APP("Apps & binaries", "#6e7b8b"), FOLDER("Folders", "#565b62"), OTHER("Other", "#7c7c7c");
+        final String label; final Color color;
+        Cat(String label, String hex) { this.label = label; this.color = Color.web(hex); }
+    }
+
+    private static final Map<String, Cat> EXT = new HashMap<>();
+    static {
+        put(Cat.VIDEO, "mp4 mkv avi mov wmv flv webm m4v mpg mpeg");
+        put(Cat.IMAGE, "jpg jpeg png gif bmp svg webp tif tiff heic ico raw psd");
+        put(Cat.AUDIO, "mp3 wav flac aac ogg m4a wma opus");
+        put(Cat.ARCHIVE, "zip rar 7z tar gz bz2 xz iso jar cab jmod");
+        put(Cat.CODE, "java js ts jsx tsx py c cpp cc h hpp cs go rs rb php html htm css scss json xml yml yaml sh kt swift sql");
+        put(Cat.DOC, "pdf doc docx xls xlsx ppt pptx txt md csv rtf odt ods");
+        put(Cat.APP, "exe dll so dylib bin msi sys lib obj pdb node class");
+    }
+    private static void put(Cat c, String exts) { for (String e : exts.split(" ")) EXT.put(e, c); }
 
     private final Canvas canvas = new Canvas();
     private final ListView<Node> list = new ListView<>();
@@ -68,17 +95,23 @@ public class App extends Application {
     private final ProgressBar driveBar = new ProgressBar(0);
     private final ProgressIndicator spinner = new ProgressIndicator();
     private final Button upBtn = new Button("↑ Up");
+    private final HBox legendBar = new HBox();
+    private final VBox legendRows = new VBox(3);
     private VBox startPane;
 
     private final Deque<Node> stack = new ArrayDeque<>();
     private final List<Tile> tiles = new ArrayList<>();
+    private final List<Tile> topTiles = new ArrayList<>();
+    private final IdentityHashMap<Node, Cat> dominant = new IdentityHashMap<>();
+    private final EnumMap<Cat, Long> catSums = new EnumMap<>(Cat.class);
     private Node selected;
     private long currentTotal;
 
     private final String shotPath = System.getProperty("diskbloom.shot");
     private Scene scene;
 
-    private record Tile(Node node, double x, double y, double w, double h, Color color) {}
+    private record Rect(Node node, double x, double y, double w, double h) {}
+    private record Tile(Node node, double x, double y, double w, double h, Color color, int depth, boolean leaf) {}
 
     public static void main(String[] args) {
         launch(args);
@@ -107,7 +140,7 @@ public class App extends Application {
     private HBox buildToolbar(Stage stage) {
         Button open = new Button("Open folder…");
         open.setOnAction(e -> chooseAndScan(stage));
-        upBtn.setOnAction(e -> { if (stack.size() > 1) { stack.pop(); selected = null; render(); } });
+        upBtn.setOnAction(e -> { if (stack.size() > 1) { stack.pop(); selected = null; showCurrent(); } });
         upBtn.setDisable(true);
         spinner.setVisible(false);
         spinner.setPrefSize(18, 18);
@@ -133,8 +166,13 @@ public class App extends Application {
         driveBar.setPrefHeight(8);
         driveLbl.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px;");
 
+        Label byType = new Label("By type");
+        byType.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px; -fx-font-weight:bold; -fx-padding:2 0 0 0;");
+        legendBar.setPrefHeight(10);
+        legendBar.setMaxWidth(Double.MAX_VALUE);
+
         Label listTitle = new Label("Largest items");
-        listTitle.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px; -fx-font-weight:bold; -fx-padding:6 0 2 0;");
+        listTitle.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px; -fx-font-weight:bold; -fx-padding:4 0 2 0;");
         list.setStyle("-fx-control-inner-background:" + PANEL + "; -fx-background-color:" + PANEL + ";");
         list.setCellFactory(lv -> new ItemCell());
         list.setOnMouseClicked(e -> {
@@ -143,11 +181,12 @@ public class App extends Application {
         list.getSelectionModel().selectedItemProperty().addListener((o, ov, nv) -> {
             selected = nv;
             if (nv != null) updateStatus(nv);
-            redraw();
+            draw();
         });
         VBox.setVgrow(list, Priority.ALWAYS);
 
-        VBox box = new VBox(4, brand, sTitle, sSize, sCount, driveBar, driveLbl, divider(), listTitle, list);
+        VBox box = new VBox(4, brand, sTitle, sSize, sCount, driveBar, driveLbl,
+                divider(), byType, legendBar, legendRows, divider(), listTitle, list);
         box.setPadding(new Insets(12));
         box.setPrefWidth(300);
         box.setStyle("-fx-background-color:" + PANEL + "; -fx-border-color:" + LINE + "; -fx-border-width:0 1 0 0;");
@@ -162,10 +201,15 @@ public class App extends Application {
         canvas.widthProperty().addListener(o -> render());
         canvas.heightProperty().addListener(o -> render());
         canvas.setOnMouseClicked(e -> {
-            Tile t = tileAt(e.getX(), e.getY());
-            if (t == null) return;
-            if (e.getClickCount() == 2) drill(t.node());
-            else { list.getSelectionModel().select(t.node()); }
+            if (e.getClickCount() == 2) {
+                Node d = dirAt(e.getX(), e.getY());
+                if (d != null) drill(d);
+            } else {
+                Tile t = tileAt(e.getX(), e.getY());
+                if (t == null) return;
+                if (list.getItems().contains(t.node())) list.getSelectionModel().select(t.node());
+                else { selected = t.node(); updateStatus(t.node()); draw(); }
+            }
         });
         canvas.setOnMouseMoved(e -> {
             Tile t = tileAt(e.getX(), e.getY());
@@ -181,7 +225,6 @@ public class App extends Application {
         title.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:32px; -fx-font-weight:bold;");
         Label sub = new Label("Pick a drive or folder to see what's using space");
         sub.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:14px;");
-
         HBox drives = new HBox(10);
         drives.setAlignment(Pos.CENTER);
         for (File r : File.listRoots()) {
@@ -212,7 +255,7 @@ public class App extends Application {
         return r;
     }
 
-    // ---- scanning --------------------------------------------------------
+    // ---- scanning + navigation ------------------------------------------
 
     private void chooseAndScan(Stage stage) {
         DirectoryChooser dc = new DirectoryChooser();
@@ -239,7 +282,7 @@ public class App extends Application {
             stack.clear();
             stack.push(task.getValue());
             selected = null;
-            render();
+            showCurrent();
             if (shotPath != null) Platform.runLater(this::exportAndExit);
         });
         task.setOnFailed(e -> {
@@ -269,62 +312,112 @@ public class App extends Application {
         if (n != null && n.dir && n.children != null && !n.children.isEmpty()) {
             stack.push(n);
             selected = null;
-            render();
+            showCurrent();
         }
+    }
+
+    // Analyse the current folder (sidebar, legend, per-child colours), then lay out + draw.
+    private void showCurrent() {
+        Node cur = stack.peek();
+        upBtn.setDisable(stack.size() <= 1);
+        updateSidebar(cur);
+        if (cur == null) { list.getItems().clear(); render(); return; }
+        crumb.setText(breadcrumb() + "      " + Sizes.human(cur.size));
+        currentTotal = cur.size;
+
+        List<Node> kids = new ArrayList<>();
+        if (cur.children != null) for (Node n : cur.children) if (n.size > 0) kids.add(n);
+        dominant.clear();
+        for (Node k : kids) dominant.put(k, dominantCat(k));
+        list.getItems().setAll(kids);
+
+        catSums.clear();
+        accumulate(cur, catSums);
+        updateLegend();
+        render();
     }
 
     // ---- rendering -------------------------------------------------------
 
     private void render() {
-        Node cur = stack.peek();
-        upBtn.setDisable(stack.size() <= 1);
-        updateSidebar(cur);
-        if (cur == null) { tiles.clear(); redraw(); return; }
-        crumb.setText(breadcrumb() + "      " + Sizes.human(cur.size));
-
         tiles.clear();
-        currentTotal = cur.size;
-        List<Node> kids = new ArrayList<>();
-        if (cur.children != null) for (Node n : cur.children) if (n.size > 0) kids.add(n);
-        list.getItems().setAll(kids);
-
+        topTiles.clear();
+        Node cur = stack.peek();
         double W = canvas.getWidth(), H = canvas.getHeight();
-        if (!kids.isEmpty() && W >= 2 && H >= 2) {
-            double total = 0;
-            for (Node n : kids) total += n.size;
-            double scale = (W * H) / total;
-            double[] areas = new double[kids.size()];
-            for (int i = 0; i < kids.size(); i++) areas[i] = kids.get(i).size * scale;
-            squarify(kids, areas, 0, 0, W, H, tiles);
-        }
-        redraw();
+        if (cur != null && W >= 2 && H >= 2) layout(cur, 0, 0, W, H, 0);
+        draw();
     }
 
-    private void redraw() {
+    private void layout(Node node, double x, double y, double w, double h, int depth) {
+        List<Node> kids = new ArrayList<>();
+        if (node.children != null) for (Node n : node.children) if (n.size > 0) kids.add(n);
+        if (kids.isEmpty()) return;
+        double total = 0;
+        for (Node n : kids) total += n.size;
+        if (total <= 0) return;
+        double scale = (w * h) / total;
+        double[] areas = new double[kids.size()];
+        for (int i = 0; i < kids.size(); i++) areas[i] = kids.get(i).size * scale;
+
+        List<Rect> rects = new ArrayList<>();
+        squarify(kids, areas, x, y, w, h, rects);
+        for (Rect r : rects) {
+            boolean drillable = r.node().dir && r.node().children != null && !r.node().children.isEmpty();
+            boolean recurse = drillable && depth < MAX_DEPTH && r.w() > MIN_SUBDIV && r.h() > MIN_SUBDIV;
+            Tile t = new Tile(r.node(), r.x(), r.y(), r.w(), r.h(), colorOf(r.node()), depth, !recurse);
+            tiles.add(t);
+            if (depth == 0) topTiles.add(t);
+            if (recurse) {
+                double header = r.h() > 30 ? 16 : 0;
+                double iw = r.w() - 4, ih = r.h() - header - 2;
+                if (iw > MIN_LEAF && ih > MIN_LEAF) layout(r.node(), r.x() + 2, r.y() + header, iw, ih, depth + 1);
+            }
+        }
+    }
+
+    private void draw() {
         GraphicsContext g = canvas.getGraphicsContext2D();
         g.setFill(Color.web(BG));
         g.fillRect(0, 0, canvas.getWidth(), canvas.getHeight());
-        for (Tile t : tiles) draw(g, t);
+        for (Tile t : tiles) {
+            if (t.leaf()) drawLeaf(g, t);
+            else drawFolder(g, t);
+        }
     }
 
-    private void draw(GraphicsContext g, Tile t) {
+    private void drawFolder(GraphicsContext g, Tile t) {
+        g.setFill(Color.web(CONTAINER));
+        g.fillRect(t.x(), t.y(), t.w(), t.h());
+        boolean sel = t.node() == selected;
+        g.setStroke(sel ? Color.WHITE : Color.web("#111111"));
+        g.setLineWidth(sel ? 2.5 : 1);
+        g.strokeRect(t.x() + 0.5, t.y() + 0.5, t.w() - 1, t.h() - 1);
+        if (t.h() > 18 && t.w() > 52) {
+            g.setFill(Color.web("#cfcfcf"));
+            g.setFont(Font.font("Segoe UI", FontWeight.SEMI_BOLD, 11));
+            g.fillText(clip(t.node().name + "\\", t.w() - 10), t.x() + 5, t.y() + 12);
+        }
+    }
+
+    private void drawLeaf(GraphicsContext g, Tile t) {
         boolean sel = t.node() == selected;
         g.setFill(t.color());
         g.fillRect(t.x(), t.y(), t.w(), t.h());
         g.setStroke(sel ? Color.WHITE : Color.web(BG));
-        g.setLineWidth(sel ? 3 : 1.5);
+        g.setLineWidth(sel ? 2.5 : 1);
         g.strokeRect(t.x(), t.y(), t.w(), t.h());
-
         if (t.w() > 46 && t.h() > 22) {
             g.setFill(luminance(t.color()) > 0.55 ? Color.web("#141414") : Color.web("#f6f6f6"));
             g.setFont(Font.font("Segoe UI", FontWeight.SEMI_BOLD, 12));
-            g.fillText(clip(t.node().name + (t.node().dir ? "\\" : ""), t.w() - 12), t.x() + 6, t.y() + 17);
-            if (t.h() > 38) {
+            g.fillText(clip(t.node().name + (t.node().dir ? "\\" : ""), t.w() - 12), t.x() + 6, t.y() + 16);
+            if (t.h() > 36) {
                 g.setFont(Font.font("Segoe UI", 11));
-                g.fillText(Sizes.human(t.node().size), t.x() + 6, t.y() + 32);
+                g.fillText(Sizes.human(t.node().size), t.x() + 6, t.y() + 30);
             }
         }
     }
+
+    // ---- sidebar / legend ------------------------------------------------
 
     private void updateSidebar(Node cur) {
         if (cur == null) { sTitle.setText("—"); sSize.setText(""); sCount.setText(""); return; }
@@ -335,13 +428,49 @@ public class App extends Application {
         sCount.setText(folders + " folders · " + files + " files");
     }
 
+    private void updateLegend() {
+        legendBar.getChildren().clear();
+        legendRows.getChildren().clear();
+        long total = 0;
+        for (long v : catSums.values()) total += v;
+        if (total <= 0) return;
+
+        List<Map.Entry<Cat, Long>> entries = new ArrayList<>(catSums.entrySet());
+        entries.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+
+        for (Map.Entry<Cat, Long> e : entries) {
+            Region seg = new Region();
+            seg.setPrefWidth(Math.max(1, (double) e.getValue() / total * 276));
+            seg.setMinWidth(Region.USE_PREF_SIZE);
+            seg.setPrefHeight(10);
+            seg.setStyle("-fx-background-color:" + rgb(e.getKey().color) + ";");
+            legendBar.getChildren().add(seg);
+        }
+        int shown = 0;
+        for (Map.Entry<Cat, Long> e : entries) {
+            double pct = 100.0 * e.getValue() / total;
+            if (pct < 1 || shown >= 5) break;
+            Region sw = new Region();
+            sw.setMinSize(9, 9); sw.setPrefSize(9, 9); sw.setMaxSize(9, 9);
+            sw.setStyle("-fx-background-color:" + rgb(e.getKey().color) + "; -fx-background-radius:2;");
+            Label l = new Label(e.getKey().label + "  " + String.format("%.0f%%", pct) + "  ·  " + Sizes.human(e.getValue()));
+            l.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px;");
+            HBox row = new HBox(6, sw, l);
+            row.setAlignment(Pos.CENTER_LEFT);
+            legendRows.getChildren().add(row);
+            shown++;
+        }
+    }
+
     private void updateStatus(Node n) {
         double pct = currentTotal > 0 ? 100.0 * n.size / currentTotal : 0;
         status.setText(String.format("%s      %s   (%.1f%%)", n.path, Sizes.human(n.size), pct));
     }
 
+    // ---- treemap maths + categories -------------------------------------
+
     // Squarified treemap (Bruls, Huizing, van Wijk): rows kept near aspect 1.
-    private void squarify(List<Node> kids, double[] areas, double x, double y, double w, double h, List<Tile> out) {
+    private void squarify(List<Node> kids, double[] areas, double x, double y, double w, double h, List<Rect> out) {
         int start = 0, n = kids.size();
         while (start < n) {
             double side = Math.min(w, h);
@@ -362,7 +491,7 @@ public class App extends Application {
                 double rowW = rowArea / h, cy = y;
                 for (int i = start; i < start + count; i++) {
                     double th = areas[i] / rowW;
-                    out.add(new Tile(kids.get(i), x, cy, rowW, th, colorFor(i)));
+                    out.add(new Rect(kids.get(i), x, cy, rowW, th));
                     cy += th;
                 }
                 x += rowW; w -= rowW;
@@ -370,7 +499,7 @@ public class App extends Application {
                 double rowH = rowArea / w, cx = x;
                 for (int i = start; i < start + count; i++) {
                     double tw = areas[i] / rowH;
-                    out.add(new Tile(kids.get(i), cx, y, tw, rowH, colorFor(i)));
+                    out.add(new Rect(kids.get(i), cx, y, tw, rowH));
                     cx += tw;
                 }
                 y += rowH; h -= rowH;
@@ -384,8 +513,31 @@ public class App extends Application {
         return Math.max(side2 * mx / s2, s2 / (side2 * mn));
     }
 
-    private static Color colorFor(int i) {
-        return Color.hsb((i * 137.508) % 360.0, 0.55, 0.80);
+    private static Cat catOf(Node n) {
+        if (n.dir) return Cat.FOLDER;
+        String nm = n.name;
+        int d = nm.lastIndexOf('.');
+        String ext = d >= 0 ? nm.substring(d + 1).toLowerCase() : "";
+        return EXT.getOrDefault(ext, Cat.OTHER);
+    }
+
+    private static Color colorOf(Node n) {
+        return catOf(n).color;
+    }
+
+    private static void accumulate(Node n, EnumMap<Cat, Long> sums) {
+        if (!n.dir) { sums.merge(catOf(n), n.size, Long::sum); return; }
+        if (n.children != null) for (Node c : n.children) accumulate(c, sums);
+    }
+
+    private static Cat dominantCat(Node n) {
+        if (!n.dir) return catOf(n);
+        EnumMap<Cat, Long> m = new EnumMap<>(Cat.class);
+        accumulate(n, m);
+        Cat best = Cat.FOLDER;
+        long bv = -1;
+        for (Map.Entry<Cat, Long> e : m.entrySet()) if (e.getValue() > bv) { bv = e.getValue(); best = e.getKey(); }
+        return best;
     }
 
     private static double luminance(Color c) {
@@ -404,10 +556,21 @@ public class App extends Application {
     }
 
     private Tile tileAt(double x, double y) {
+        Tile found = null;
+        for (Tile t : tiles) if (contains(t, x, y)) found = t; // last (deepest) wins
+        return found;
+    }
+
+    private Node dirAt(double x, double y) {
+        Node found = null;
         for (Tile t : tiles) {
-            if (x >= t.x() && x < t.x() + t.w() && y >= t.y() && y < t.y() + t.h()) return t;
+            if (contains(t, x, y) && t.node().dir && t.node().children != null && !t.node().children.isEmpty()) found = t.node();
         }
-        return null;
+        return found;
+    }
+
+    private static boolean contains(Tile t, double x, double y) {
+        return x >= t.x() && x < t.x() + t.w() && y >= t.y() && y < t.y() + t.h();
     }
 
     private String breadcrumb() {
@@ -432,14 +595,15 @@ public class App extends Application {
         }
     }
 
-    // Row in the "Largest items" list: colour swatch (matching its tile) + name + size + %.
+    // Row in the "Largest items" list: swatch (dominant type) + name + size + %.
     private final class ItemCell extends ListCell<Node> {
         @Override protected void updateItem(Node n, boolean empty) {
             super.updateItem(n, empty);
             if (empty || n == null) { setGraphic(null); return; }
+            Cat c = dominant.getOrDefault(n, catOf(n));
             Region sw = new Region();
             sw.setMinSize(11, 11); sw.setPrefSize(11, 11); sw.setMaxSize(11, 11);
-            sw.setStyle("-fx-background-color:" + rgb(colorFor(getIndex())) + "; -fx-background-radius:2;");
+            sw.setStyle("-fx-background-color:" + rgb(c.color) + "; -fx-background-radius:2;");
             Label name = new Label(n.name + (n.dir ? "\\" : ""));
             name.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:12px;");
             HBox.setHgrow(name, Priority.ALWAYS);
