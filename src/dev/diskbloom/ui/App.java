@@ -177,7 +177,8 @@ public class App extends Application {
         List<String> params = getParameters().getRaw();
         if (!params.isEmpty()) { scan(Paths.get(params.get(0))); return; }
         ScanCache.Cached cached = ScanCache.load(cacheFile());
-        if (cached != null && cached.root() != null) showCached(cached);
+        if (cached != null && cached.root() != null && cached.root().children != null && !cached.root().children.isEmpty())
+            showCached(cached);
         else scan(systemRoot());
     }
 
@@ -404,8 +405,10 @@ public class App extends Application {
             biggestBtn.setText("Biggest files");
             showResults();
             showCurrent();
+            boolean usable = result.dir && result.children != null && !result.children.isEmpty();
+            if (!usable) status.setText("Nothing to show for " + root + " — is that path valid and accessible?");
             final Node toCache = result;
-            if (shotPath == null) new Thread(() -> {
+            if (shotPath == null && usable) new Thread(() -> {
                 try { ScanCache.save(cacheFile(), toCache, System.currentTimeMillis()); } catch (Exception ignore) { }
             }, "diskbloom-cache-save").start();
             String ask = System.getProperty("diskbloom.ask");

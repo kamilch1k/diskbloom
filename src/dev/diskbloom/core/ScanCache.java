@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -30,12 +31,15 @@ public final class ScanCache {
     public static void save(Path file, Node root, long timestamp) throws IOException {
         Path parent = file.getParent();
         if (parent != null) Files.createDirectories(parent);
-        try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(file)))) {
+        // write to a temp file then move, so a crash/kill mid-write never leaves a corrupt cache
+        Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
+        try (DataOutputStream out = new DataOutputStream(new BufferedOutputStream(Files.newOutputStream(tmp)))) {
             out.writeUTF(MAGIC);
             out.writeLong(timestamp);
             out.writeUTF(root.path.toString());
             writeNode(out, root);
         }
+        Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
     }
 
     /** Returns null if the file is missing, unreadable, or a different format. */
@@ -80,6 +84,14 @@ public final class ScanCache {
 
     // ponytail: one runnable check — save a small tree, load it, assert round-trip + path rebuild.
     public static void main(String[] args) throws Exception {
+        if (args.length > 0) {
+            Cached c = load(Paths.get(args[0]));
+            if (c == null) { System.out.println("load() returned null (missing / corrupt / old format)"); return; }
+            System.out.println("root path = " + c.root().path);
+            System.out.println("root size = " + c.root().size + "  children = " + (c.root().children != null ? c.root().children.size() : "null (file)"));
+            System.out.println("timestamp = " + new java.util.Date(c.timestamp()));
+            return;
+        }
         Path tmp = Files.createTempFile("dblm-cache", ".bin");
         try {
             Node root = new Node("x", Paths.get("C:\\x"), true);
