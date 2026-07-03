@@ -35,7 +35,7 @@ public final class Theme {
             -fx-text-fill: #e6e6e6;
         }
 
-        .button, .toggle-button {
+        .button, .toggle-button, .menu-button {
             -fx-background-color: #2e2e30;
             -fx-text-fill: #e6e6e6;
             -fx-background-radius: 6;
@@ -45,7 +45,9 @@ public final class Theme {
             -fx-padding: 6 12 6 12;
             -fx-cursor: hand;
         }
-        .button:hover, .toggle-button:hover { -fx-background-color: #3a3a3d; -fx-border-color: #4a4a4e; }
+        .menu-button .label { -fx-text-fill: #e6e6e6; }
+        .menu-button .arrow, .menu-button .arrow-button .arrow { -fx-background-color: #b0b0b0; }
+        .button:hover, .toggle-button:hover, .menu-button:hover { -fx-background-color: #3a3a3d; -fx-border-color: #4a4a4e; }
         .button:pressed { -fx-background-color: #292a2c; }
         .button:focused { -fx-border-color: -fx-accent; }
         .button:disabled { -fx-opacity: 0.45; }

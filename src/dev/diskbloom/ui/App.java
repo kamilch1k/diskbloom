@@ -28,6 +28,7 @@ import javafx.scene.control.DialogPane;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
+import javafx.scene.control.MenuButton;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.ScrollPane;
@@ -140,7 +141,6 @@ public class App extends Application {
     private Pane holder;
     private VBox startPane, scanPane;
     private AtomicBoolean cancelFlag;
-    private final Button biggestBtn = new Button("Biggest files");
     private boolean biggestMode;
     private List<Node> biggestFiles;
     private final TreeTableView<Node> tree = new TreeTableView<>();
@@ -159,10 +159,9 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.9.0";            // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.10.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export CSV");
-    private final Button typesBtn = new Button("By type");
-    private final Button bigOldBtn = new Button("Big & old");
+    private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private boolean typesMode;                         // showing the file-type breakdown pane
     private ScrollPane typesPane;
     private static FileLock instanceLock;              // held for the process lifetime (single-instance guard)
@@ -442,7 +441,6 @@ public class App extends Application {
         stack.push(cached.root());
         selected = null;
         biggestMode = false;
-        biggestBtn.setText("Biggest files");
         browseRoot = null;
         searchHits = null; searchLabel = "";
         addressField.setText(cached.root().path.toString());
@@ -465,16 +463,22 @@ public class App extends Application {
         crumb.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:13px;");
         HBox.setHgrow(crumb, Priority.ALWAYS);
 
-        biggestBtn.setOnAction(e -> { if (biggestMode) exitBiggest(); else enterBiggest(); });
-        bigOldBtn.setOnAction(e -> enterBigOld());
-        typesBtn.setOnAction(e -> { if (typesMode) exitTypes(); else enterTypes(); });
+        MenuItem miBiggest = new MenuItem("Biggest files");
+        miBiggest.setOnAction(e -> enterBiggest());
+        MenuItem miBigOld = new MenuItem("Big & old files");
+        miBigOld.setOnAction(e -> enterBigOld());
+        MenuItem miTypes = new MenuItem("File types");
+        miTypes.setOnAction(e -> enterTypes());
+        MenuItem miFolders = new MenuItem("Folders (normal view)");
+        miFolders.setOnAction(e -> showFolders());
+        viewsMenu.getItems().setAll(miBiggest, miBigOld, miTypes, new SeparatorMenuItem(), miFolders);
         dupBtn.setOnAction(e -> findDuplicates());
         exportBtn.setOnAction(e -> chooseAndExport(stage));
         viewBtn.setOnAction(e -> toggleView());
         assistantBtn.setDisable(true);
         assistantBtn.setOnAction(e -> toggleAssistant());
         settingsBtn.setOnAction(e -> showSettings());
-        HBox bar = new HBox(10, open, rescanBtn, upBtn, biggestBtn, bigOldBtn, typesBtn, dupBtn, exportBtn, viewBtn, crumb, assistantBtn, settingsBtn);
+        HBox bar = new HBox(10, open, rescanBtn, upBtn, viewsMenu, dupBtn, exportBtn, viewBtn, crumb, assistantBtn, settingsBtn);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(8, 12, 8, 12));
         bar.setStyle("-fx-background-color:#2b2b2b; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
@@ -768,7 +772,6 @@ public class App extends Application {
             stack.push(result);
             selected = null;
             biggestMode = false;
-            biggestBtn.setText("Biggest files");
             browseRoot = null;
             searchHits = null; searchLabel = "";
             addressField.setText(result.path.toString());
@@ -828,7 +831,7 @@ public class App extends Application {
     }
 
     private void showCurrent() {
-        typesMode = false; typesBtn.setText("By type");
+        typesMode = false;
         Node cur = stack.peek();
         upBtn.setDisable(stack.size() <= 1);
         applyView();
@@ -861,8 +864,7 @@ public class App extends Application {
         Scanner.listChildren(n);
         browseRoot = n;
         biggestMode = false;
-        biggestBtn.setText("Biggest files");
-        typesMode = false; typesBtn.setText("By type");
+        typesMode = false;
         selected = null;
         if (!listView) { listView = true; viewBtn.setText("Map view"); }
 
@@ -1567,7 +1569,7 @@ public class App extends Application {
         Node root = stack.peekLast();
         if (root == null) return;
         searchHits = null; searchLabel = ""; browseRoot = null;
-        typesMode = false; typesBtn.setText("By type");
+        typesMode = false;
         PriorityQueue<Node> heap = new PriorityQueue<>(Comparator.comparingLong((Node n) -> n.size));
         collectInto(root, heap); // keeps only the top BIGGEST_N files, bounded memory
         List<Node> files = new ArrayList<>(heap);
@@ -1575,7 +1577,6 @@ public class App extends Application {
 
         biggestFiles = files;
         biggestMode = true;
-        biggestBtn.setText("← Folders");
         upBtn.setDisable(true);
         selected = null;
 
@@ -1597,9 +1598,11 @@ public class App extends Application {
         render();
     }
 
-    private void exitBiggest() {
+    /** Leave any analysis view (biggest / big&old / types / search) and show the scanned folders again. */
+    private void showFolders() {
         biggestMode = false;
-        biggestBtn.setText("Biggest files");
+        typesMode = false;
+        searchHits = null; searchLabel = "";
         showCurrent();
         if (listView) rebuildTree();
     }
@@ -1663,8 +1666,8 @@ public class App extends Application {
     private void showFlat(List<Node> files, String title, String statusMsg) {
         searchHits = files;
         searchLabel = title;
-        biggestMode = false; biggestBtn.setText("Biggest files");
-        typesMode = false; typesBtn.setText("By type");
+        biggestMode = false;
+        typesMode = false;
         browseRoot = null;
         selected = null;
         if (!listView) { listView = true; viewBtn.setText("Map view"); }
@@ -1714,9 +1717,8 @@ public class App extends Application {
         if (root == null) { info("Scan a folder first to see its file-type breakdown."); return; }
         typesMode = true;
         searchHits = null; searchLabel = "";
-        biggestMode = false; biggestBtn.setText("Biggest files");
+        biggestMode = false;
         selected = null;
-        typesBtn.setText("← Back");
 
         // sidebar reflects the scanned root while the centre shows the breakdown
         currentTotal = root.size;
@@ -1732,13 +1734,6 @@ public class App extends Application {
         showResults();     // applyView() now shows typesPane
         crumb.setText("File types by size  ·  " + root.name);
         status.setText("Which file types use the most space  ·  click a type to see those files");
-    }
-
-    private void exitTypes() {
-        typesMode = false;
-        typesBtn.setText("By type");
-        showCurrent();
-        if (listView) rebuildTree();
     }
 
     private void buildTypesPane(Node root) {

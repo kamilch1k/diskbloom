@@ -27,7 +27,7 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 - [x] Two center views — the treemap or a WinDirStat-style bar list (name · proportional bar · size); toggle in the toolbar
 - [x] Optional auto-scan on launch (off by default — opens to a start screen or your last cached scan; toggle in Settings) with a live progress overlay (files/bytes/current folder + cancel)
 - [x] Right-click actions — open, reveal in Explorer, delete to Recycle Bin (recoverable, with confirm)
-- [x] Analysis views — biggest files, "big & old" (largest files, least-recently-modified first), and a file-type breakdown (which extensions use the most space; click one to filter to those files)
+- [x] Analysis views (under the "Views" menu) — biggest files, "big & old" (largest files, least-recently-modified first), and a file-type breakdown (which extensions use the most space; click one to filter to those files)
 - [x] Optional local-LLM assistant (Ollama) — a chat window to ask what's using space or what's safe to delete, then approve its suggested deletions; fully on-device
 - [x] Live file browser — address bar, drive picker, and lazy folder loading to navigate the whole PC, Explorer-style (right-click any folder to scan it)
 - [x] Search / filter — by name, extension (`.mp4`), or type (`type:video`); results shown largest-first
