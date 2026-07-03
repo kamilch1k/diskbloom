@@ -17,6 +17,7 @@ import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
@@ -24,6 +25,7 @@ import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressBar;
+import javafx.scene.control.ScrollPane;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
@@ -55,11 +57,13 @@ import java.util.Comparator;
 import java.util.Deque;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -129,6 +133,9 @@ public class App extends Application {
     private final TextArea responseArea = new TextArea();
     private final TextField questionField = new TextField();
     private final Button askBtn = new Button("Ask");
+    private final VBox proposalsBox = new VBox(4);
+    private final Button recycleBtn = new Button("Move checked to Recycle Bin");
+    private VBox proposalsSection;
 
     private final Deque<Node> stack = new ArrayDeque<>();
     private final List<Tile> tiles = new ArrayList<>();
@@ -375,6 +382,7 @@ public class App extends Application {
             if (ask != null) { runAsk(ask); return; }
             if (System.getProperty("diskbloom.biggest") != null) enterBiggest();
             if (System.getProperty("diskbloom.assistant") != null) toggleAssistant();
+            if (System.getProperty("diskbloom.testproposals") != null) { toggleAssistant(); injectTestProposals(); }
             if (shotPath != null) Platform.runLater(this::exportAndExit);
         });
         task.setOnFailed(e -> { showStart(); crumb.setText("Scan failed: " + task.getException()); });
@@ -695,12 +703,15 @@ public class App extends Application {
 
     // ---- assistant (local LLM via Ollama) -------------------------------
 
+    private static final String DELETE_TAG = "SUGGEST_DELETE:";
+
     private static final String SYSTEM_PROMPT =
             "You are diskbloom's local disk-cleanup assistant. You are given a summary of a disk scan. "
-            + "Answer the user's question concisely and practically. When asked what to delete, only suggest "
-            + "things clearly safe to remove (caches, temp files, downloads, old installers, logs) and never OS, "
-            + "system, or program files. Keep answers short. You cannot take actions yourself; the user reviews "
-            + "and approves everything.";
+            + "Answer concisely and practically. When you recommend removing something, add one line per item, "
+            + "each on its own line, formatted exactly as: SUGGEST_DELETE: <full path>  (copy the full path "
+            + "verbatim from the summary). Only suggest things clearly safe to remove (caches, temp files, "
+            + "downloads, old installers, logs); never OS, system, or program files. Keep prose short. The user "
+            + "reviews and approves every deletion; you cannot delete anything yourself.";
 
     private VBox buildAssistantPanel() {
         Label title = new Label("Assistant");
@@ -732,7 +743,19 @@ public class App extends Application {
         Label note = new Label("Local · nothing leaves your PC");
         note.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:10px;");
 
-        VBox v = new VBox(8, title, modelPicker, presets, responseArea, askRow, note);
+        Label pTitle = new Label("Suggested deletions — you approve each");
+        pTitle.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px; -fx-font-weight:bold;");
+        ScrollPane pScroll = new ScrollPane(proposalsBox);
+        pScroll.setFitToWidth(true);
+        pScroll.setMaxHeight(170);
+        pScroll.setStyle("-fx-background:" + PANEL + "; -fx-background-color:" + PANEL + ";");
+        recycleBtn.setMaxWidth(Double.MAX_VALUE);
+        recycleBtn.setOnAction(e -> recycleChecked());
+        proposalsSection = new VBox(6, pTitle, pScroll, recycleBtn);
+        proposalsSection.setVisible(false);
+        proposalsSection.setManaged(false);
+
+        VBox v = new VBox(8, title, modelPicker, presets, responseArea, proposalsSection, askRow, note);
         v.setPadding(new Insets(12));
         v.setPrefWidth(360);
         v.setStyle("-fx-background-color:" + PANEL + "; -fx-border-color:" + LINE + "; -fx-border-width:0 0 0 1;");
@@ -775,6 +798,7 @@ public class App extends Application {
         if (model == null) { responseArea.setText("No model available. Is Ollama running?"); return; }
         String prompt = "Disk scan summary:\n" + buildContext() + "\nQuestion: " + question;
         responseArea.setText("Thinking… (the first query loads the model into memory, ~15s)");
+        clearProposals();
         askBtn.setDisable(true);
         questionField.setDisable(true);
         Task<String> task = new Task<>() {
@@ -782,7 +806,7 @@ public class App extends Application {
                 return Ollama.chat(model, SYSTEM_PROMPT, prompt);
             }
         };
-        task.setOnSucceeded(e -> { responseArea.setText(task.getValue()); askBtn.setDisable(false); questionField.setDisable(false); });
+        task.setOnSucceeded(e -> { handleResponse(task.getValue()); askBtn.setDisable(false); questionField.setDisable(false); });
         task.setOnFailed(e -> { responseArea.setText("Error: " + task.getException()); askBtn.setDisable(false); questionField.setDisable(false); });
         Thread th = new Thread(task, "ollama-chat");
         th.setDaemon(true);
@@ -799,6 +823,86 @@ public class App extends Application {
             catch (Exception ex) { System.out.println("ask failed: " + ex); }
             Platform.exit();
         }, "ollama-ask").start();
+    }
+
+    private void handleResponse(String text) {
+        List<String> paths = new ArrayList<>();
+        StringBuilder prose = new StringBuilder();
+        for (String line : text.split("\n", -1)) {
+            String t = line.strip();
+            if (t.startsWith(DELETE_TAG)) {
+                String p = stripEnds(t.substring(DELETE_TAG.length()).strip());
+                if (!p.isEmpty()) paths.add(p);
+            } else {
+                prose.append(line).append('\n');
+            }
+        }
+        responseArea.setText(prose.toString().strip());
+        List<Node> found = new ArrayList<>();
+        Node root = stack.peekLast();
+        if (root != null && !paths.isEmpty()) matchWalk(root, new HashSet<>(paths), found);
+        showProposals(found);
+    }
+
+    private void showProposals(List<Node> nodes) {
+        proposalsBox.getChildren().clear();
+        if (nodes.isEmpty()) { proposalsSection.setVisible(false); proposalsSection.setManaged(false); return; }
+        for (Node n : nodes) {
+            CheckBox cb = new CheckBox(Sizes.human(n.size) + "   " + n.path);
+            cb.setUserData(n);
+            cb.setWrapText(true);
+            cb.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:11px;");
+            proposalsBox.getChildren().add(cb);
+        }
+        proposalsSection.setVisible(true);
+        proposalsSection.setManaged(true);
+    }
+
+    private void clearProposals() {
+        proposalsBox.getChildren().clear();
+        if (proposalsSection != null) { proposalsSection.setVisible(false); proposalsSection.setManaged(false); }
+    }
+
+    private void recycleChecked() {
+        List<Node> sel = new ArrayList<>();
+        for (javafx.scene.Node child : proposalsBox.getChildren()) {
+            if (child instanceof CheckBox cb && cb.isSelected()) sel.add((Node) cb.getUserData());
+        }
+        if (sel.isEmpty()) return;
+        long sum = 0;
+        for (Node n : sel) sum += n.size;
+        Desktop d = Desktop.isDesktopSupported() ? Desktop.getDesktop() : null;
+        if (d == null || !d.isSupported(Desktop.Action.MOVE_TO_TRASH)) { info("Recycle Bin isn't available on this system."); return; }
+        Alert a = new Alert(Alert.AlertType.CONFIRMATION,
+                "Move " + sel.size() + " item(s) (" + Sizes.human(sum) + ") to the Recycle Bin?",
+                ButtonType.OK, ButtonType.CANCEL);
+        a.setTitle("Delete to Recycle Bin");
+        a.setHeaderText("Approve these deletions?");
+        if (a.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        for (Node n : sel) { try { d.moveToTrash(n.path.toFile()); } catch (Exception ignore) { } }
+        clearProposals();
+        Node cur = stack.peek();
+        if (cur != null) scan(cur.path);
+    }
+
+    private static void matchWalk(Node n, Set<String> paths, List<Node> out) {
+        if (paths.contains(n.path.toString())) out.add(n);
+        if (n.children != null) for (Node c : n.children) matchWalk(c, paths, out);
+    }
+
+    private static String stripEnds(String s) {
+        return s.replaceAll("^[\\s`\"']+", "").replaceAll("[\\s`\"']+$", "");
+    }
+
+    // Headless check of the propose->approve pipeline: inject a canned response
+    // referencing two real files in the scan so the checklist populates.
+    private void injectTestProposals() {
+        Node r = stack.peekLast();
+        if (r == null) return;
+        String canned = "These small leftover files are examples you could remove:\n"
+                + DELETE_TAG + " " + r.path.resolve("readme.txt") + "\n"
+                + DELETE_TAG + " " + r.path.resolve("release") + "\n";
+        handleResponse(canned);
     }
 
     private String buildContext() {
