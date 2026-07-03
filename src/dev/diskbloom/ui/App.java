@@ -159,7 +159,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.8.0";            // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.9.0";            // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export CSV");
     private final Button typesBtn = new Button("By type");
     private final Button bigOldBtn = new Button("Big & old");
@@ -252,6 +252,18 @@ public class App extends Application {
         Files.delete(c.resolve("a.txt"));
         Files.delete(c);
 
+        // per-root cache: a saved scan loads back for the same root, not for another
+        assert hashName(Paths.get("C:\\Users")).equals(hashName(Paths.get("c:\\users"))) : "cache key case-stable";
+        assert !hashName(Paths.get("C:\\Users")).equals(hashName(Paths.get("D:\\Users"))) : "cache key per-root";
+        Path cc = Files.createTempDirectory("dbcache");
+        Files.writeString(cc.resolve("f.dat"), "data");
+        ScanCache.save(cacheFileFor(cc), Scanner.scan(cc), 999L);
+        assert cachedFor(cc) != null : "cache hit for the same root";
+        assert cachedFor(Paths.get("Z:\\definitely\\not\\scanned\\" + System.nanoTime())) == null : "no cache for an unknown root";
+        Files.deleteIfExists(cacheFileFor(cc));
+        Files.delete(cc.resolve("f.dat"));
+        Files.delete(cc);
+
         System.out.println("App self-check OK");
     }
 
@@ -286,9 +298,11 @@ public class App extends Application {
         if (browse != null) { browseTo(Paths.get(browse)); if (shotPath != null) Platform.runLater(this::exportAndExit); return; }
         List<String> params = getParameters().getRaw();
         if (!params.isEmpty()) { scan(Paths.get(params.get(0))); return; }
-        ScanCache.Cached cached = ScanCache.load(cacheFile());
-        if (cached != null && cached.root() != null && cached.root().children != null && !cached.root().children.isEmpty())
+        ScanCache.Cached cached = newestCache();
+        if (cached != null) {
             showCached(cached);
+            if (shotPath != null) Platform.runLater(this::exportAndExit);
+        }
         else if (autoScan) scan(systemRoot());
         else {
             showStart();
@@ -303,10 +317,56 @@ public class App extends Application {
         return root != null ? root : home;
     }
 
-    private static Path cacheFile() {
+    private static Path diskbloomDir() {
         String base = System.getenv("LOCALAPPDATA");
-        Path dir = (base != null ? Paths.get(base) : Paths.get(System.getProperty("user.home"))).resolve("diskbloom");
-        return dir.resolve("lastscan.bin");
+        return (base != null ? Paths.get(base) : Paths.get(System.getProperty("user.home"))).resolve("diskbloom");
+    }
+
+    private static Path cacheFile() { return diskbloomDir().resolve("lastscan.bin"); }  // legacy single slot
+    private static Path cacheDir() { return diskbloomDir().resolve("cache"); }
+
+    // A stable per-root file name; the stored root path is re-checked on load, so a hash collision is harmless.
+    private static String hashName(Path root) {
+        String key = root.toAbsolutePath().toString().toLowerCase();
+        return Integer.toHexString(key.hashCode()) + "_" + key.length();
+    }
+
+    private static Path cacheFileFor(Path root) { return cacheDir().resolve(hashName(root) + ".bin"); }
+
+    private static boolean usableCache(ScanCache.Cached c) {
+        return c != null && c.root() != null && c.root().children != null && !c.root().children.isEmpty();
+    }
+
+    /** A cached scan for exactly this root, or null (missing / stale format / path mismatch). */
+    private static ScanCache.Cached cachedFor(Path root) {
+        ScanCache.Cached c = ScanCache.load(cacheFileFor(root));
+        if (!usableCache(c)) return null;
+        return c.root().path.toAbsolutePath().toString().equalsIgnoreCase(root.toAbsolutePath().toString()) ? c : null;
+    }
+
+    /** The most recently saved scan across all roots (for launch), or the legacy single slot. */
+    private static ScanCache.Cached newestCache() {
+        Path dir = cacheDir();
+        Path newest = null;
+        long best = Long.MIN_VALUE;
+        if (Files.isDirectory(dir)) {
+            try (var s = Files.newDirectoryStream(dir, "*.bin")) {
+                for (Path p : s) {
+                    long t = Files.getLastModifiedTime(p).toMillis();
+                    if (t > best) { best = t; newest = p; }
+                }
+            } catch (Exception ignore) { }
+        }
+        if (newest != null) { ScanCache.Cached c = ScanCache.load(newest); if (usableCache(c)) return c; }
+        ScanCache.Cached legacy = ScanCache.load(cacheFile());   // migrate old single-slot users
+        return usableCache(legacy) ? legacy : null;
+    }
+
+    /** Show this root's cached scan instantly if we have one; otherwise walk it. */
+    private void openOrScan(Path root) {
+        ScanCache.Cached c = cachedFor(root);
+        if (c != null) showCached(c);
+        else scan(root);
     }
 
     private static Path settingsFile() {
@@ -552,7 +612,7 @@ public class App extends Application {
         for (File r : File.listRoots()) {
             if (!r.exists()) continue;
             Button b = new Button(r.getPath());
-            b.setOnAction(e -> scan(r.toPath()));
+            b.setOnAction(e -> openOrScan(r.toPath()));
             drives.getChildren().add(b);
         }
         VBox v = new VBox(18, title, sub, drives);
@@ -680,7 +740,7 @@ public class App extends Application {
         File init = cur != null ? cur.path.toFile() : new File(System.getProperty("user.home"));
         if (init.isDirectory()) dc.setInitialDirectory(init);
         File dir = dc.showDialog(stage);
-        if (dir != null) scan(dir.toPath());
+        if (dir != null) openOrScan(dir.toPath());
     }
 
     private void scan(Path root) {
@@ -718,8 +778,9 @@ public class App extends Application {
             boolean usable = result.dir && result.children != null && !result.children.isEmpty();
             if (!usable) status.setText("Nothing to show for " + root + " — is that path valid and accessible?");
             final Node toCache = result;
+            final Path cacheTarget = cacheFileFor(root);
             if (shotPath == null && usable) new Thread(() -> {
-                try { ScanCache.save(cacheFile(), toCache, System.currentTimeMillis()); } catch (Exception ignore) { }
+                try { ScanCache.save(cacheTarget, toCache, System.currentTimeMillis()); } catch (Exception ignore) { }
             }, "diskbloom-cache-save").start();
             String ask = System.getProperty("diskbloom.ask");
             if (ask != null) { runAsk(ask); return; }
