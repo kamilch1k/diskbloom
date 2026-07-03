@@ -23,7 +23,10 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 ## Roadmap
 
 - [x] Scan engine — zero-dependency recursive walk, size aggregation, largest-first (with a self-check)
-- [x] JavaFX UI — pick a folder, scan off the UI thread, squarified treemap with click-to-drill-down and hover details
+- [x] Desktop UI — nested, type-coloured squarified treemap with drill-down; sidebar with folder summary, drive usage, a by-type legend, and a largest-items list
+- [x] Auto-scan on launch with a live progress overlay (files/bytes/current folder + cancel)
+- [x] Right-click actions — open, reveal in Explorer, delete to Recycle Bin (recoverable, with confirm)
+- [x] Biggest-files view — the largest individual files across the whole scan
 - [ ] Raw NTFS MFT reading via Win32 FFI for WizTree-class scan speed
 - [ ] Hardlink / junction-aware accuracy
 - [ ] Packaged installer (jpackage)

@@ -46,6 +46,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.EnumMap;
 import java.util.HashMap;
@@ -53,6 +54,7 @@ import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.PriorityQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -111,6 +113,9 @@ public class App extends Application {
     private Pane holder;
     private VBox startPane, scanPane;
     private AtomicBoolean cancelFlag;
+    private final Button biggestBtn = new Button("Biggest files");
+    private boolean biggestMode;
+    private List<Node> biggestFiles;
 
     private final Deque<Node> stack = new ArrayDeque<>();
     private final List<Tile> tiles = new ArrayList<>();
@@ -164,7 +169,8 @@ public class App extends Application {
         crumb.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:13px;");
         HBox.setHgrow(crumb, Priority.ALWAYS);
 
-        HBox bar = new HBox(10, open, upBtn, crumb);
+        biggestBtn.setOnAction(e -> { if (biggestMode) exitBiggest(); else enterBiggest(); });
+        HBox bar = new HBox(10, open, upBtn, biggestBtn, crumb);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(8, 12, 8, 12));
         bar.setStyle("-fx-background-color:#2b2b2b; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
@@ -343,8 +349,11 @@ public class App extends Application {
             stack.clear();
             stack.push(result);
             selected = null;
+            biggestMode = false;
+            biggestBtn.setText("Biggest files");
             showResults();
             showCurrent();
+            if (System.getProperty("diskbloom.biggest") != null) enterBiggest();
             if (shotPath != null) Platform.runLater(this::exportAndExit);
         });
         task.setOnFailed(e -> { showStart(); crumb.setText("Scan failed: " + task.getException()); });
@@ -401,10 +410,32 @@ public class App extends Application {
     private void render() {
         tiles.clear();
         topTiles.clear();
-        Node cur = stack.peek();
         double W = canvas.getWidth(), H = canvas.getHeight();
-        if (cur != null && W >= 2 && H >= 2) layout(cur, 0, 0, W, H, 0);
+        if (W >= 2 && H >= 2) {
+            if (biggestMode) {
+                if (biggestFiles != null && !biggestFiles.isEmpty()) layoutFlat(biggestFiles, W, H);
+            } else {
+                Node cur = stack.peek();
+                if (cur != null) layout(cur, 0, 0, W, H, 0);
+            }
+        }
         draw();
+    }
+
+    private void layoutFlat(List<Node> items, double W, double H) {
+        double total = 0;
+        for (Node n : items) total += n.size;
+        if (total <= 0) return;
+        double scale = (W * H) / total;
+        double[] areas = new double[items.size()];
+        for (int i = 0; i < items.size(); i++) areas[i] = items.get(i).size * scale;
+        List<Rect> rects = new ArrayList<>();
+        squarify(items, areas, 0, 0, W, H, rects);
+        for (Rect r : rects) {
+            Tile t = new Tile(r.node(), r.x(), r.y(), r.w(), r.h(), colorOf(r.node()), 0, true);
+            tiles.add(t);
+            topTiles.add(t);
+        }
     }
 
     private void layout(Node node, double x, double y, double w, double h, int depth) {
@@ -639,6 +670,56 @@ public class App extends Application {
             sb.append(it.next().name);
         }
         return sb.toString();
+    }
+
+    // ---- biggest files view ---------------------------------------------
+
+    private static final int BIGGEST_N = 500;
+
+    private void enterBiggest() {
+        Node root = stack.peekLast();
+        if (root == null) return;
+        PriorityQueue<Node> heap = new PriorityQueue<>(Comparator.comparingLong((Node n) -> n.size));
+        collectInto(root, heap); // keeps only the top BIGGEST_N files, bounded memory
+        List<Node> files = new ArrayList<>(heap);
+        files.sort(Comparator.comparingLong((Node n) -> n.size).reversed());
+
+        biggestFiles = files;
+        biggestMode = true;
+        biggestBtn.setText("← Folders");
+        upBtn.setDisable(true);
+        selected = null;
+
+        long sum = 0;
+        for (Node f : files) sum += f.size;
+        currentTotal = sum;
+        crumb.setText("Biggest files  ·  top " + files.size() + " across " + root.name);
+        sTitle.setText("Biggest files");
+        sSize.setText(Sizes.human(sum));
+        sCount.setText(files.size() + " files");
+        dominant.clear();
+        for (Node f : files) dominant.put(f, catOf(f));
+        list.getItems().setAll(files);
+        catSums.clear();
+        for (Node f : files) catSums.merge(catOf(f), f.size, Long::sum);
+        updateLegend();
+        status.setText("Biggest individual files across the whole scan  ·  right-click for actions");
+        render();
+    }
+
+    private void exitBiggest() {
+        biggestMode = false;
+        biggestBtn.setText("Biggest files");
+        showCurrent();
+    }
+
+    private static void collectInto(Node n, PriorityQueue<Node> heap) {
+        if (!n.dir) {
+            heap.offer(n);
+            if (heap.size() > BIGGEST_N) heap.poll();
+            return;
+        }
+        if (n.children != null) for (Node c : n.children) collectInto(c, heap);
     }
 
     // ---- actions ---------------------------------------------------------
