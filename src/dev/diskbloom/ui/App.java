@@ -13,12 +13,16 @@ import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
+import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonType;
+import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
+import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressBar;
-import javafx.scene.control.ProgressIndicator;
+import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.image.WritableImage;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -34,6 +38,7 @@ import javafx.stage.DirectoryChooser;
 import javafx.stage.Stage;
 
 import javax.imageio.ImageIO;
+import java.awt.Desktop;
 import java.io.File;
 import java.nio.file.FileStore;
 import java.nio.file.Files;
@@ -48,13 +53,15 @@ import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * The diskbloom window: a folder tree scanned off the UI thread, shown as a
- * nested squarified treemap (folders = containers, files = leaves coloured by
- * type) plus a sidebar (summary, type legend, largest-items list).
+ * The diskbloom window: scans a folder off the UI thread (with a live progress
+ * overlay), then shows a nested squarified treemap (folders = containers, files
+ * = type-coloured leaves) plus a sidebar. Right-click for actions.
  *
- * Launch with -Ddiskbloom.shot=out.png to render one folder to a PNG and exit.
+ * On launch it auto-scans the system drive; pass a folder path to scan that
+ * instead, or -Ddiskbloom.shot=out.png to render one folder to a PNG and exit.
  */
 public class App extends Application {
 
@@ -63,7 +70,6 @@ public class App extends Application {
     private static final int MAX_DEPTH = 6;
     private static final double MIN_SUBDIV = 28, MIN_LEAF = 3;
 
-    // File-type categories drive both leaf colour and the legend.
     private enum Cat {
         VIDEO("Video", "#7f77dd"), IMAGE("Images", "#1d9e75"), AUDIO("Audio", "#d4537e"),
         ARCHIVE("Archives", "#ba7517"), CODE("Code", "#378add"), DOC("Documents", "#639922"),
@@ -87,17 +93,24 @@ public class App extends Application {
     private final Canvas canvas = new Canvas();
     private final ListView<Node> list = new ListView<>();
     private final Label crumb = new Label();
-    private final Label status = new Label("Pick a folder to begin.");
+    private final Label status = new Label("Starting…");
     private final Label sTitle = new Label("—");
     private final Label sSize = new Label();
     private final Label sCount = new Label();
     private final Label driveLbl = new Label();
     private final ProgressBar driveBar = new ProgressBar(0);
-    private final ProgressIndicator spinner = new ProgressIndicator();
     private final Button upBtn = new Button("↑ Up");
     private final HBox legendBar = new HBox();
     private final VBox legendRows = new VBox(3);
-    private VBox startPane;
+
+    private final Label scanTitle = new Label();
+    private final Label scanInfo = new Label();
+    private final Label scanPath = new Label();
+    private final ProgressBar scanBar = new ProgressBar(-1);
+    private final Button cancelBtn = new Button("Cancel");
+    private Pane holder;
+    private VBox startPane, scanPane;
+    private AtomicBoolean cancelFlag;
 
     private final Deque<Node> stack = new ArrayDeque<>();
     private final List<Tile> tiles = new ArrayList<>();
@@ -132,7 +145,13 @@ public class App extends Application {
         stage.show();
 
         List<String> params = getParameters().getRaw();
-        if (!params.isEmpty()) scan(Paths.get(params.get(0)));
+        scan(params.isEmpty() ? systemRoot() : Paths.get(params.get(0)));
+    }
+
+    private static Path systemRoot() {
+        Path home = Paths.get(System.getProperty("user.home"));
+        Path root = home.getRoot();
+        return root != null ? root : home;
     }
 
     // ---- layout ----------------------------------------------------------
@@ -142,13 +161,10 @@ public class App extends Application {
         open.setOnAction(e -> chooseAndScan(stage));
         upBtn.setOnAction(e -> { if (stack.size() > 1) { stack.pop(); selected = null; showCurrent(); } });
         upBtn.setDisable(true);
-        spinner.setVisible(false);
-        spinner.setPrefSize(18, 18);
-        spinner.setMaxSize(18, 18);
         crumb.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:13px;");
         HBox.setHgrow(crumb, Priority.ALWAYS);
 
-        HBox bar = new HBox(10, open, upBtn, spinner, crumb);
+        HBox bar = new HBox(10, open, upBtn, crumb);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(8, 12, 8, 12));
         bar.setStyle("-fx-background-color:#2b2b2b; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
@@ -183,6 +199,10 @@ public class App extends Application {
             if (nv != null) updateStatus(nv);
             draw();
         });
+        list.setOnContextMenuRequested(e -> {
+            Node n = list.getSelectionModel().getSelectedItem();
+            if (n != null) menuFor(n).show(list, e.getScreenX(), e.getScreenY());
+        });
         VBox.setVgrow(list, Priority.ALWAYS);
 
         VBox box = new VBox(4, brand, sTitle, sSize, sCount, driveBar, driveLbl,
@@ -194,7 +214,7 @@ public class App extends Application {
     }
 
     private StackPane buildCenter() {
-        Pane holder = new Pane(canvas);
+        holder = new Pane(canvas);
         holder.setStyle("-fx-background-color:" + BG + ";");
         canvas.widthProperty().bind(holder.widthProperty());
         canvas.heightProperty().bind(holder.heightProperty());
@@ -215,9 +235,19 @@ public class App extends Application {
             Tile t = tileAt(e.getX(), e.getY());
             if (t != null) updateStatus(t.node());
         });
+        canvas.setOnContextMenuRequested(e -> {
+            Tile t = tileAt(e.getX(), e.getY());
+            if (t != null) {
+                selected = t.node();
+                draw();
+                menuFor(t.node()).show(canvas, e.getScreenX(), e.getScreenY());
+            }
+        });
 
         startPane = buildStartPane();
-        return new StackPane(holder, startPane);
+        scanPane = buildScanPane();
+        scanPane.setVisible(false);
+        return new StackPane(holder, startPane, scanPane);
     }
 
     private VBox buildStartPane() {
@@ -239,6 +269,24 @@ public class App extends Application {
         return v;
     }
 
+    private VBox buildScanPane() {
+        scanTitle.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:20px; -fx-font-weight:bold;");
+        scanBar.setPrefWidth(380);
+        scanBar.setPrefHeight(12);
+        scanInfo.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:13px;");
+        scanPath.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px;");
+        scanPath.setMaxWidth(480);
+        cancelBtn.setOnAction(e -> { if (cancelFlag != null) cancelFlag.set(true); });
+
+        VBox inner = new VBox(14, scanTitle, scanBar, scanInfo, scanPath, cancelBtn);
+        inner.setAlignment(Pos.CENTER);
+        inner.setMaxWidth(520);
+        VBox v = new VBox(inner);
+        v.setAlignment(Pos.CENTER);
+        v.setStyle("-fx-background-color:" + BG + ";");
+        return v;
+    }
+
     private HBox buildStatusBar() {
         status.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:12px;");
         HBox b = new HBox(status);
@@ -255,6 +303,10 @@ public class App extends Application {
         return r;
     }
 
+    private void showStart() { startPane.setVisible(true); scanPane.setVisible(false); }
+    private void showScanning() { scanPane.setVisible(true); startPane.setVisible(false); }
+    private void showResults() { startPane.setVisible(false); scanPane.setVisible(false); }
+
     // ---- scanning + navigation ------------------------------------------
 
     private void chooseAndScan(Stage stage) {
@@ -268,27 +320,34 @@ public class App extends Application {
     }
 
     private void scan(Path root) {
+        AtomicBoolean cancel = new AtomicBoolean(false);
+        cancelFlag = cancel;
         Task<Node> task = new Task<>() {
             @Override protected Node call() {
-                return Scanner.scan(root);
+                return Scanner.scan(root, (files, bytes, path) -> Platform.runLater(() -> {
+                    scanInfo.setText(String.format("%,d files · %s scanned", files, Sizes.human(bytes)));
+                    scanPath.setText(path);
+                }), cancel);
             }
         };
-        spinner.setVisible(true);
+        scanTitle.setText("Scanning " + root);
+        scanInfo.setText("Starting…");
+        scanPath.setText("");
         crumb.setText("Scanning " + root + " …");
+        showScanning();
+
         task.setOnSucceeded(e -> {
-            spinner.setVisible(false);
-            startPane.setVisible(false);
+            Node result = task.getValue();
+            if (result == null) { showStart(); crumb.setText("Scan cancelled."); return; } // cancelled
             setDriveUsage(root);
             stack.clear();
-            stack.push(task.getValue());
+            stack.push(result);
             selected = null;
+            showResults();
             showCurrent();
             if (shotPath != null) Platform.runLater(this::exportAndExit);
         });
-        task.setOnFailed(e -> {
-            spinner.setVisible(false);
-            crumb.setText("Scan failed: " + task.getException());
-        });
+        task.setOnFailed(e -> { showStart(); crumb.setText("Scan failed: " + task.getException()); });
         Thread th = new Thread(task, "diskbloom-scan");
         th.setDaemon(true);
         th.start();
@@ -316,7 +375,6 @@ public class App extends Application {
         }
     }
 
-    // Analyse the current folder (sidebar, legend, per-child colours), then lay out + draw.
     private void showCurrent() {
         Node cur = stack.peek();
         upBtn.setDisable(stack.size() <= 1);
@@ -334,6 +392,7 @@ public class App extends Application {
         catSums.clear();
         accumulate(cur, catSums);
         updateLegend();
+        status.setText("Hover for details  ·  double-click to open a folder  ·  right-click for actions");
         render();
     }
 
@@ -469,7 +528,6 @@ public class App extends Application {
 
     // ---- treemap maths + categories -------------------------------------
 
-    // Squarified treemap (Bruls, Huizing, van Wijk): rows kept near aspect 1.
     private void squarify(List<Node> kids, double[] areas, double x, double y, double w, double h, List<Rect> out) {
         int start = 0, n = kids.size();
         while (start < n) {
@@ -557,7 +615,7 @@ public class App extends Application {
 
     private Tile tileAt(double x, double y) {
         Tile found = null;
-        for (Tile t : tiles) if (contains(t, x, y)) found = t; // last (deepest) wins
+        for (Tile t : tiles) if (contains(t, x, y)) found = t;
         return found;
     }
 
@@ -581,6 +639,55 @@ public class App extends Application {
             sb.append(it.next().name);
         }
         return sb.toString();
+    }
+
+    // ---- actions ---------------------------------------------------------
+
+    private ContextMenu menuFor(Node n) {
+        File f = n.path.toFile();
+        MenuItem open = new MenuItem(n.dir ? "Open folder" : "Open");
+        open.setOnAction(a -> runQuietly(() -> Desktop.getDesktop().open(f)));
+        MenuItem reveal = new MenuItem("Reveal in Explorer");
+        reveal.setOnAction(a -> runQuietly(() -> new ProcessBuilder("explorer.exe", "/select," + f.getAbsolutePath()).start()));
+        MenuItem del = new MenuItem("Delete to Recycle Bin…");
+        del.setOnAction(a -> deleteToTrash(n));
+        return new ContextMenu(open, reveal, new SeparatorMenuItem(), del);
+    }
+
+    private void deleteToTrash(Node n) {
+        File f = n.path.toFile();
+        Desktop d = Desktop.isDesktopSupported() ? Desktop.getDesktop() : null;
+        if (d == null || !d.isSupported(Desktop.Action.MOVE_TO_TRASH)) {
+            info("Recycle Bin isn't available on this system.");
+            return;
+        }
+        Alert a = new Alert(Alert.AlertType.CONFIRMATION,
+                f.getAbsolutePath() + "\n\n" + Sizes.human(n.size) + " will be moved to the Recycle Bin.",
+                ButtonType.OK, ButtonType.CANCEL);
+        a.setTitle("Delete to Recycle Bin");
+        a.setHeaderText("Move to Recycle Bin?");
+        if (a.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+
+        boolean ok;
+        try { ok = d.moveToTrash(f); } catch (Exception ex) { ok = false; }
+        if (ok) {
+            Node cur = stack.peek();
+            if (cur != null) scan(cur.path); // re-scan current folder to reflect the deletion
+        } else {
+            info("Couldn't delete " + f.getName() + ".");
+        }
+    }
+
+    private static void runQuietly(ThrowingRunnable r) {
+        try { r.run(); } catch (Exception ignore) { }
+    }
+
+    private interface ThrowingRunnable { void run() throws Exception; }
+
+    private void info(String msg) {
+        Alert a = new Alert(Alert.AlertType.INFORMATION, msg, ButtonType.OK);
+        a.setHeaderText(null);
+        a.showAndWait();
     }
 
     private void exportAndExit() {
