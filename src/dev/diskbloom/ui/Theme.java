@@ -13,9 +13,13 @@ import java.util.Base64;
  */
 public final class Theme {
 
-    public static void apply(Scene scene) {
-        String uri = "data:text/css;base64," + Base64.getEncoder().encodeToString(CSS.getBytes(StandardCharsets.UTF_8));
-        scene.getStylesheets().add(uri);
+    public static void apply(Scene scene) { scene.getStylesheets().add(uri()); }
+
+    /** Style a dialog (its own window/scene isn't covered by the main scene's stylesheet). */
+    public static void apply(javafx.scene.control.DialogPane pane) { pane.getStylesheets().add(uri()); }
+
+    private static String uri() {
+        return "data:text/css;base64," + Base64.getEncoder().encodeToString(CSS.getBytes(StandardCharsets.UTF_8));
     }
 
     private static final String CSS = """

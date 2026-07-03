@@ -25,13 +25,14 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 - [x] Scan engine — zero-dependency recursive walk, size aggregation, largest-first (with a self-check)
 - [x] Desktop UI — nested, type-coloured squarified treemap with drill-down; sidebar with folder summary, drive usage, a by-type legend, and a largest-items list
 - [x] Two center views — the treemap or a WinDirStat-style bar list (name · proportional bar · size); toggle in the toolbar
-- [x] Auto-scan on launch with a live progress overlay (files/bytes/current folder + cancel)
+- [x] Optional auto-scan on launch (off by default — opens to a start screen or your last cached scan; toggle in Settings) with a live progress overlay (files/bytes/current folder + cancel)
 - [x] Right-click actions — open, reveal in Explorer, delete to Recycle Bin (recoverable, with confirm)
 - [x] Biggest-files view — the largest individual files across the whole scan
 - [x] Optional local-LLM assistant (Ollama) — a chat window to ask what's using space or what's safe to delete, then approve its suggested deletions; fully on-device
 - [x] Live file browser — address bar, drive picker, and lazy folder loading to navigate the whole PC, Explorer-style (right-click any folder to scan it)
 - [x] Search / filter — by name, extension (`.mp4`), or type (`type:video`); results shown largest-first
-- [x] Cleanup analyzer — the local LLM ranks your biggest files keep-vs-junk with reasons and cleaning advice; every suggested deletion is approval-gated, and a safety guard blocks system/`.git` paths
+- [x] Cleanup analyzer — the local LLM ranks your biggest files keep-vs-junk (weighing size and age) with reasons and cleaning advice; every suggested deletion is approval-gated, and a safety guard blocks system/`.git` paths
+- [x] Duplicate finder — content-hash (SHA-256) detection of identical files across the scan; approve removing the redundant copies (one is always kept), safety-guarded and recoverable via the Recycle Bin
 - [x] Modern flat dark theme, and a cached last scan for instant relaunch (Rescan to refresh)
 - [ ] Raw NTFS MFT reading via Win32 FFI for WizTree-class scan speed
 - [ ] Hardlink / junction-aware accuracy

@@ -23,6 +23,8 @@ import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContextMenu;
+import javafx.scene.control.Dialog;
+import javafx.scene.control.DialogPane;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.control.ListView;
@@ -54,10 +56,14 @@ import javafx.stage.Stage;
 import javax.imageio.ImageIO;
 import java.awt.Desktop;
 import java.io.File;
+import java.io.InputStream;
 import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -70,6 +76,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -144,6 +151,10 @@ public class App extends Application {
     private String searchLabel = "";
     private static final int SEARCH_CAP = 3000;
 
+    private boolean autoScan = false;                 // persisted; when false the app never scans on launch
+    private final Button dupBtn = new Button("Duplicates");
+    private final Button settingsBtn = new Button("Settings");
+
     private BorderPane rootPane;
     private final Button assistantBtn = new Button("Assistant");
     private VBox assistantPanel;
@@ -173,12 +184,15 @@ public class App extends Application {
     private record Tile(Node node, double x, double y, double w, double h, Color color, int depth, boolean leaf) {}
 
     public static void main(String[] args) {
-        if (System.getProperty("diskbloom.selftest") != null) { selfTest(); return; }
+        if (System.getProperty("diskbloom.selftest") != null) {
+            try { selfTest(); } catch (Throwable e) { e.printStackTrace(); System.exit(1); }
+            System.exit(0);   // force exit: a JavaFX class-load can leave a non-daemon thread
+        }
         launch(args);
     }
 
     // java -ea -Ddiskbloom.selftest=1 --add-modules javafx.controls,javafx.swing -cp out dev.diskbloom.ui.App
-    private static void selfTest() {
+    private static void selfTest() throws Exception {
         assert isProtected(Paths.get("C:\\cc\\diskbloom\\.git\\objects\\ab\\cd")) : ".git guarded";
         assert isProtected(Paths.get("C:\\Windows\\System32\\evil.dll")) : "system guarded";
         assert isProtected(Paths.get("C:\\Program Files\\App\\a.exe")) : "program files guarded";
@@ -188,6 +202,17 @@ public class App extends Application {
         assert parseQuery("app").test(javaFile) : "name substring";
         assert parseQuery("type:code").test(javaFile) : "type match";
         assert !parseQuery(".mp4").test(javaFile) : "ext non-match";
+
+        // duplicate detection: two identical files + one different -> exactly one pair
+        Path d = Files.createTempDirectory("dbdup");
+        Files.writeString(d.resolve("a.txt"), "same-content-here");
+        Files.writeString(d.resolve("b.txt"), "same-content-here");
+        Files.writeString(d.resolve("c.txt"), "different-content");
+        List<List<Node>> g = findDupes(Scanner.scan(d));
+        assert g.size() == 1 && g.get(0).size() == 2 : "expected one duplicate pair, got " + g;
+        for (String f : new String[]{"a.txt", "b.txt", "c.txt"}) Files.delete(d.resolve(f));
+        Files.delete(d);
+
         System.out.println("App self-check OK");
     }
 
@@ -208,6 +233,7 @@ public class App extends Application {
 
         assistantPanel = buildAssistantPanel();
         initAssistant();
+        loadSettings();
 
         String browse = System.getProperty("diskbloom.browse");
         if (browse != null) { browseTo(Paths.get(browse)); if (shotPath != null) Platform.runLater(this::exportAndExit); return; }
@@ -216,7 +242,12 @@ public class App extends Application {
         ScanCache.Cached cached = ScanCache.load(cacheFile());
         if (cached != null && cached.root() != null && cached.root().children != null && !cached.root().children.isEmpty())
             showCached(cached);
-        else scan(systemRoot());
+        else if (autoScan) scan(systemRoot());
+        else {
+            showStart();
+            status.setText("Pick a drive or folder to scan — or turn on auto-scan in Settings.");
+            if (shotPath != null) Platform.runLater(this::exportAndExit);
+        }
     }
 
     private static Path systemRoot() {
@@ -229,6 +260,50 @@ public class App extends Application {
         String base = System.getenv("LOCALAPPDATA");
         Path dir = (base != null ? Paths.get(base) : Paths.get(System.getProperty("user.home"))).resolve("diskbloom");
         return dir.resolve("lastscan.bin");
+    }
+
+    private static Path settingsFile() {
+        String base = System.getenv("LOCALAPPDATA");
+        Path dir = (base != null ? Paths.get(base) : Paths.get(System.getProperty("user.home"))).resolve("diskbloom");
+        return dir.resolve("settings.properties");
+    }
+
+    private void loadSettings() {
+        Properties p = new Properties();
+        Path f = settingsFile();
+        if (Files.exists(f)) { try (var r = Files.newBufferedReader(f)) { p.load(r); } catch (Exception ignore) { } }
+        autoScan = Boolean.parseBoolean(p.getProperty("autoScan", "false"));
+    }
+
+    private void saveSettings() {
+        Properties p = new Properties();
+        p.setProperty("autoScan", String.valueOf(autoScan));
+        Path f = settingsFile();
+        try {
+            Files.createDirectories(f.getParent());
+            try (var w = Files.newBufferedWriter(f)) { p.store(w, "diskbloom settings"); }
+        } catch (Exception ignore) { }
+    }
+
+    private void showSettings() {
+        CheckBox auto = new CheckBox("Scan automatically on launch");
+        auto.setSelected(autoScan);
+        Label note = new Label("When off, diskbloom opens to a start screen (or your last cached scan) and only scans when you ask.");
+        note.setWrapText(true);
+        note.setMaxWidth(360);
+        note.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px;");
+        VBox content = new VBox(10, auto, note);
+        content.setPadding(new Insets(6, 4, 4, 4));
+
+        Dialog<Void> d = new Dialog<>();
+        d.setTitle("Settings");
+        d.getDialogPane().setHeaderText("diskbloom settings");
+        d.getDialogPane().setContent(content);
+        d.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+        Theme.apply(d.getDialogPane());
+        d.showAndWait();
+        autoScan = auto.isSelected();
+        saveSettings();
     }
 
     private void showCached(ScanCache.Cached cached) {
@@ -261,10 +336,12 @@ public class App extends Application {
         HBox.setHgrow(crumb, Priority.ALWAYS);
 
         biggestBtn.setOnAction(e -> { if (biggestMode) exitBiggest(); else enterBiggest(); });
+        dupBtn.setOnAction(e -> findDuplicates());
         viewBtn.setOnAction(e -> toggleView());
         assistantBtn.setDisable(true);
         assistantBtn.setOnAction(e -> toggleAssistant());
-        HBox bar = new HBox(10, open, rescanBtn, upBtn, biggestBtn, viewBtn, crumb, assistantBtn);
+        settingsBtn.setOnAction(e -> showSettings());
+        HBox bar = new HBox(10, open, rescanBtn, upBtn, biggestBtn, dupBtn, viewBtn, crumb, assistantBtn, settingsBtn);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(8, 12, 8, 12));
         bar.setStyle("-fx-background-color:#2b2b2b; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
@@ -565,6 +642,7 @@ public class App extends Application {
             String ask = System.getProperty("diskbloom.ask");
             if (ask != null) { runAsk(ask); return; }
             if (System.getProperty("diskbloom.analyze") != null) { runAnalyze(); return; }
+            if (System.getProperty("diskbloom.dupes") != null) { runDupes(); return; }
             if (System.getProperty("diskbloom.biggest") != null) enterBiggest();
             String search = System.getProperty("diskbloom.search");
             if (search != null) runSearch(search);
@@ -1129,11 +1207,20 @@ public class App extends Application {
         StringBuilder sb = new StringBuilder();
         sb.append("Analyze my biggest files for cleanup. For EACH file, begin a line with KEEP or JUNK and a short reason. ")
           .append("Then give a few lines of overall disk-cleaning advice. ")
+          .append("A large file that hasn't been modified in a long time is a stronger JUNK candidate. ")
           .append("For every file clearly safe to remove (caches, temp files, old installers/downloads, logs, duplicates), ")
           .append("also add a line formatted exactly: ").append(DELETE_TAG).append(" <full path>. ")
-          .append("Never suggest deleting OS, system, or program files.\n\nMy ").append(k).append(" biggest files:\n");
-        for (int i = 0; i < k; i++) { Node f = files.get(i); sb.append(Sizes.human(f.size)).append("  ").append(f.path).append('\n'); }
+          .append("Never suggest deleting OS, system, or program files.\n\nMy ").append(k).append(" biggest files (with last-modified date):\n");
+        for (int i = 0; i < k; i++) {
+            Node f = files.get(i);
+            sb.append(Sizes.human(f.size)).append("  ").append(f.path).append("  (modified ").append(modDate(f.path)).append(")\n");
+        }
         return sb.toString();
+    }
+
+    private static String modDate(Path p) {
+        try { return Instant.ofEpochMilli(Files.getLastModifiedTime(p).toMillis()).atZone(ZoneId.systemDefault()).toLocalDate().toString(); }
+        catch (Exception e) { return "?"; }
     }
 
     // Headless hook: -Ddiskbloom.analyze prints the cleanup analysis and exits.
@@ -1463,6 +1550,104 @@ public class App extends Application {
 
     /** Drop results without restoring a view (for callers that set their own view next). */
     private void clearSearchState() { searchHits = null; searchLabel = ""; }
+
+    // ---- duplicate finder (content-hash, deterministic — no LLM) --------
+
+    private void findDuplicates() {
+        Node root = stack.peekLast();
+        if (root == null) { info("Scan a folder first, then find duplicates in it."); return; }
+        status.setText("Finding duplicate files (hashing same-size files)…");
+        dupBtn.setDisable(true);
+        Task<List<List<Node>>> task = new Task<>() {
+            @Override protected List<List<Node>> call() { return findDupes(root); }
+        };
+        task.setOnSucceeded(e -> { dupBtn.setDisable(false); showDuplicates(task.getValue()); });
+        task.setOnFailed(e -> { dupBtn.setDisable(false); status.setText("Duplicate scan failed: " + task.getException()); });
+        Thread th = new Thread(task, "diskbloom-dupes");
+        th.setDaemon(true);
+        th.start();
+    }
+
+    private void showDuplicates(List<List<Node>> groups) {
+        if (groups.isEmpty()) { status.setText("No duplicate files found in " + stack.peekLast().name + "."); return; }
+        long wasted = 0;
+        List<Node> extras = new ArrayList<>();
+        StringBuilder sb = new StringBuilder();
+        int shown = 0;
+        for (List<Node> g : groups) {
+            long each = g.get(0).size;
+            wasted += each * (g.size() - 1);
+            for (int i = 1; i < g.size(); i++) if (!isProtected(g.get(i).path)) extras.add(g.get(i)); // keep the first copy
+            if (shown < 12) {
+                sb.append("• ").append(g.size()).append("× ").append(Sizes.human(each)).append("  ").append(g.get(0).name)
+                  .append("   (keep ").append(g.get(0).path).append(")\n");
+                shown++;
+            }
+        }
+        if (extras.isEmpty()) { status.setText("Found duplicates, but every extra copy is in a protected location."); return; }
+        if (rootPane.getRight() == null) toggleAssistant();   // the approval checklist lives in this panel
+        addBubble("assistant", "Found " + groups.size() + " set(s) of identical files — about " + Sizes.human(wasted)
+                + " reclaimable by keeping one copy of each. Tick the redundant copies below to Recycle them "
+                + "(one copy of every set is always kept).\n\n" + sb.toString().strip());
+        showProposals(extras);
+        status.setText(groups.size() + " duplicate set(s)  ·  " + Sizes.human(wasted) + " reclaimable  ·  approve below");
+    }
+
+    /** Group identical files (same size AND same SHA-256). Each returned group has >= 2 files. */
+    private static List<List<Node>> findDupes(Node root) {
+        Map<Long, List<Node>> bySize = new HashMap<>();
+        collectBySize(root, bySize);
+        List<List<Node>> groups = new ArrayList<>();
+        for (List<Node> sameSize : bySize.values()) {
+            if (sameSize.size() < 2) continue;                 // unique size -> can't be a duplicate
+            Map<String, List<Node>> byHash = new HashMap<>();
+            for (Node n : sameSize) {
+                String h = sha256(n.path);
+                if (h != null) byHash.computeIfAbsent(h, k -> new ArrayList<>()).add(n);
+            }
+            for (List<Node> g : byHash.values()) if (g.size() >= 2) groups.add(g);
+        }
+        groups.sort((a, b) -> Long.compare(b.get(0).size * (b.size() - 1), a.get(0).size * (a.size() - 1))); // biggest win first
+        return groups;
+    }
+
+    private static void collectBySize(Node n, Map<Long, List<Node>> bySize) {
+        if (!n.dir) { if (n.size > 0) bySize.computeIfAbsent(n.size, k -> new ArrayList<>()).add(n); return; }
+        if (n.children != null) for (Node c : n.children) collectBySize(c, bySize);
+    }
+
+    // ponytail: full-content SHA-256 (must be exact for a delete feature). Add a cheap
+    // prefix pre-filter if huge same-size groups ever make this slow.
+    private static String sha256(Path p) {
+        try (InputStream in = Files.newInputStream(p)) {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] buf = new byte[1 << 16];
+            int r;
+            while ((r = in.read(buf)) > 0) md.update(buf, 0, r);
+            byte[] d = md.digest();
+            StringBuilder sb = new StringBuilder(d.length * 2);
+            for (byte b : d) sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            return sb.toString();
+        } catch (Exception e) { return null; }   // unreadable -> excluded (safe: never proposed for deletion)
+    }
+
+    // Headless hook: -Ddiskbloom.dupes prints duplicate sets and exits.
+    private void runDupes() {
+        Node root = stack.peekLast();
+        if (root == null) { Platform.exit(); return; }
+        new Thread(() -> {
+            List<List<Node>> groups = findDupes(root);
+            long wasted = 0;
+            System.out.println("=== DUPLICATES in " + root.path + " ===");
+            for (List<Node> g : groups) {
+                long each = g.get(0).size; wasted += each * (g.size() - 1);
+                System.out.println(g.size() + "x " + Sizes.human(each) + "  " + g.get(0).name);
+                for (Node n : g) System.out.println("    " + n.path);
+            }
+            System.out.println("sets: " + groups.size() + ", reclaimable: " + Sizes.human(wasted));
+            Platform.exit();
+        }, "diskbloom-dupes").start();
+    }
 
     // ---- actions ---------------------------------------------------------
 
