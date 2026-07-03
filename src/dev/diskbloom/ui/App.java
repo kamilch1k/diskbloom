@@ -2,6 +2,7 @@ package dev.diskbloom.ui;
 
 import dev.diskbloom.core.Scanner;
 import dev.diskbloom.core.Scanner.Node;
+import dev.diskbloom.core.ScanCache;
 import dev.diskbloom.core.Sizes;
 import dev.diskbloom.llm.Ollama;
 
@@ -165,6 +166,7 @@ public class App extends Application {
         rootPane.setBottom(buildStatusBar());
 
         scene = new Scene(rootPane, 1180, 720, Color.web(BG));
+        Theme.apply(scene);
         stage.setTitle("diskbloom");
         stage.setScene(scene);
         stage.show();
@@ -173,7 +175,10 @@ public class App extends Application {
         initAssistant();
 
         List<String> params = getParameters().getRaw();
-        scan(params.isEmpty() ? systemRoot() : Paths.get(params.get(0)));
+        if (!params.isEmpty()) { scan(Paths.get(params.get(0))); return; }
+        ScanCache.Cached cached = ScanCache.load(cacheFile());
+        if (cached != null && cached.root() != null) showCached(cached);
+        else scan(systemRoot());
     }
 
     private static Path systemRoot() {
@@ -182,11 +187,32 @@ public class App extends Application {
         return root != null ? root : home;
     }
 
+    private static Path cacheFile() {
+        String base = System.getenv("LOCALAPPDATA");
+        Path dir = (base != null ? Paths.get(base) : Paths.get(System.getProperty("user.home"))).resolve("diskbloom");
+        return dir.resolve("lastscan.bin");
+    }
+
+    private void showCached(ScanCache.Cached cached) {
+        setDriveUsage(cached.root().path);
+        stack.clear();
+        stack.push(cached.root());
+        selected = null;
+        biggestMode = false;
+        biggestBtn.setText("Biggest files");
+        showResults();
+        showCurrent();
+        String when = new java.text.SimpleDateFormat("MMM d, HH:mm").format(new java.util.Date(cached.timestamp()));
+        status.setText("Showing cached scan from " + when + "  ·  click Rescan to refresh");
+    }
+
     // ---- layout ----------------------------------------------------------
 
     private HBox buildToolbar(Stage stage) {
         Button open = new Button("Open folder…");
         open.setOnAction(e -> chooseAndScan(stage));
+        Button rescanBtn = new Button("Rescan");
+        rescanBtn.setOnAction(e -> { Node r = stack.peekLast(); scan(r != null ? r.path : systemRoot()); });
         upBtn.setOnAction(e -> { if (stack.size() > 1) { stack.pop(); selected = null; showCurrent(); } });
         upBtn.setDisable(true);
         crumb.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:13px;");
@@ -195,7 +221,7 @@ public class App extends Application {
         biggestBtn.setOnAction(e -> { if (biggestMode) exitBiggest(); else enterBiggest(); });
         assistantBtn.setDisable(true);
         assistantBtn.setOnAction(e -> toggleAssistant());
-        HBox bar = new HBox(10, open, upBtn, biggestBtn, crumb, assistantBtn);
+        HBox bar = new HBox(10, open, rescanBtn, upBtn, biggestBtn, crumb, assistantBtn);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(8, 12, 8, 12));
         bar.setStyle("-fx-background-color:#2b2b2b; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
@@ -378,6 +404,10 @@ public class App extends Application {
             biggestBtn.setText("Biggest files");
             showResults();
             showCurrent();
+            final Node toCache = result;
+            if (shotPath == null) new Thread(() -> {
+                try { ScanCache.save(cacheFile(), toCache, System.currentTimeMillis()); } catch (Exception ignore) { }
+            }, "diskbloom-cache-save").start();
             String ask = System.getProperty("diskbloom.ask");
             if (ask != null) { runAsk(ask); return; }
             if (System.getProperty("diskbloom.biggest") != null) enterBiggest();
@@ -736,6 +766,7 @@ public class App extends Application {
 
         questionField.setPromptText("Ask a question…");
         HBox.setHgrow(questionField, Priority.ALWAYS);
+        askBtn.getStyleClass().add("accent");
         askBtn.setOnAction(e -> ask(questionField.getText()));
         questionField.setOnAction(e -> ask(questionField.getText()));
         HBox askRow = new HBox(6, questionField, askBtn);
@@ -750,6 +781,7 @@ public class App extends Application {
         pScroll.setMaxHeight(170);
         pScroll.setStyle("-fx-background:" + PANEL + "; -fx-background-color:" + PANEL + ";");
         recycleBtn.setMaxWidth(Double.MAX_VALUE);
+        recycleBtn.getStyleClass().add("danger");
         recycleBtn.setOnAction(e -> recycleChecked());
         proposalsSection = new VBox(6, pTitle, pScroll, recycleBtn);
         proposalsSection.setVisible(false);
