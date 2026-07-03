@@ -33,6 +33,7 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 - [x] Search / filter — by name, extension (`.mp4`), or type (`type:video`); results shown largest-first
 - [x] Cleanup analyzer — the local LLM ranks your biggest files keep-vs-junk (weighing size and age) with reasons and cleaning advice; every suggested deletion is approval-gated, and a safety guard blocks system/`.git` paths
 - [x] Duplicate finder — content-hash (SHA-256) detection of identical files across the scan; approve removing the redundant copies (one is always kept), safety-guarded and recoverable via the Recycle Bin
+- [x] Rule-based junk finder (no AI) — flags cache/build folders (`node_modules`, `__pycache__`, `.gradle`…), logs, temp files, thumbnail caches, and installers left in Downloads; same approval checklist and safety guard
 - [x] Modern flat dark theme, and a cached last scan for instant relaunch (Rescan to refresh)
 - [x] Single-instance (only one window at a time) and the version shown in the title bar and sidebar
 - [ ] Raw NTFS MFT reading via Win32 FFI for WizTree-class scan speed

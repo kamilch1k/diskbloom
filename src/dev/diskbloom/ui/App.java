@@ -158,7 +158,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.6.0";            // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.7.0";            // shown in the title bar + sidebar; bump per release
     private final Button typesBtn = new Button("By type");
     private final Button bigOldBtn = new Button("Big & old");
     private boolean typesMode;                         // showing the file-type breakdown pane
@@ -222,6 +222,22 @@ public class App extends Application {
         assert g.size() == 1 && g.get(0).size() == 2 : "expected one duplicate pair, got " + g;
         for (String f : new String[]{"a.txt", "b.txt", "c.txt"}) Files.delete(d.resolve(f));
         Files.delete(d);
+
+        // junk rules: a node_modules dir + a .log file are junk; a normal file is not
+        Path j = Files.createTempDirectory("dbjunk");
+        Files.createDirectory(j.resolve("node_modules"));
+        Files.writeString(j.resolve("node_modules").resolve("x.js"), "x");
+        Files.writeString(j.resolve("app.log"), "log");
+        Files.writeString(j.resolve("keep.txt"), "keep");
+        List<Node> junk = new ArrayList<>();
+        collectJunk(Scanner.scan(j), junk);
+        assert junk.size() == 2 : "expected node_modules + app.log, got " + junk;
+        assert junk.stream().anyMatch(n -> n.dir && n.name.equals("node_modules")) : "node_modules flagged";
+        Files.delete(j.resolve("node_modules").resolve("x.js"));
+        Files.delete(j.resolve("node_modules"));
+        Files.delete(j.resolve("app.log"));
+        Files.delete(j.resolve("keep.txt"));
+        Files.delete(j);
 
         System.out.println("App self-check OK");
     }
@@ -306,7 +322,7 @@ public class App extends Application {
     /** True in the PNG-shot and headless test hooks — those skip the single-instance lock. */
     private boolean headlessMode() {
         if (shotPath != null) return true;
-        for (String k : new String[]{"selftest", "ask", "analyze", "dupes"})
+        for (String k : new String[]{"selftest", "ask", "analyze", "dupes", "junk"})
             if (System.getProperty("diskbloom." + k) != null) return true;
         return false;
     }
@@ -695,9 +711,11 @@ public class App extends Application {
             if (ask != null) { runAsk(ask); return; }
             if (System.getProperty("diskbloom.analyze") != null) { runAnalyze(); return; }
             if (System.getProperty("diskbloom.dupes") != null) { runDupes(); return; }
+            if (System.getProperty("diskbloom.junk") != null) { runJunk(); return; }
             if (System.getProperty("diskbloom.biggest") != null) enterBiggest();
             if (System.getProperty("diskbloom.types") != null) enterTypes();
             if (System.getProperty("diskbloom.bigold") != null) enterBigOld();
+            if (System.getProperty("diskbloom.junkui") != null) findJunk();
             String search = System.getProperty("diskbloom.search");
             if (search != null) runSearch(search);
             if (System.getProperty("diskbloom.assistant") != null) toggleAssistant();
@@ -1127,6 +1145,11 @@ public class App extends Application {
         analyzeBtn.getStyleClass().add("accent");
         analyzeBtn.setOnAction(e -> analyzeCleanup());
         presets.getChildren().add(analyzeBtn);
+        Button junkBtn = new Button("Find junk files (no AI)");
+        junkBtn.setMaxWidth(Double.MAX_VALUE);
+        junkBtn.setStyle("-fx-font-size:11px;");
+        junkBtn.setOnAction(e -> findJunk());
+        presets.getChildren().add(junkBtn);
         for (String p : new String[]{"What's using space?", "What's safe to delete?"}) {
             Button b = new Button(p);
             b.setMaxWidth(Double.MAX_VALUE);
@@ -1829,6 +1852,68 @@ public class App extends Application {
             System.out.println("sets: " + groups.size() + ", reclaimable: " + Sizes.human(wasted));
             Platform.exit();
         }, "diskbloom-dupes").start();
+    }
+
+    // ---- rule-based junk finder (deterministic — no LLM) ----------------
+
+    // Regenerable cache/build dirs, throwaway files, and installers left in Downloads.
+    // All still go through the approval checklist + isProtected guard + Recycle Bin.
+    private static final Set<String> JUNK_DIRS = Set.of(
+            "node_modules", "__pycache__", ".gradle", ".cache", ".mypy_cache",
+            ".pytest_cache", ".ipynb_checkpoints", ".next", ".parcel-cache");
+    private static final Set<String> JUNK_FILES = Set.of("thumbs.db", ".ds_store");
+    private static final Set<String> JUNK_EXTS = Set.of("log", "tmp", "temp", "bak", "dmp");
+    private static final Set<String> INSTALLER_EXTS = Set.of("msi", "exe", "iso");
+
+    private static boolean isJunkNode(Node n) {
+        String name = n.name.toLowerCase();
+        if (n.dir) return JUNK_DIRS.contains(name);
+        if (JUNK_FILES.contains(name)) return true;
+        String ext = extOf(n);
+        if (JUNK_EXTS.contains(ext)) return true;
+        return INSTALLER_EXTS.contains(ext) && n.path.toString().toLowerCase().contains("\\downloads\\");
+    }
+
+    private static void collectJunk(Node n, List<Node> out) {
+        if (isJunkNode(n)) { out.add(n); return; }   // propose the whole item; don't descend into a junk dir
+        if (n.dir && n.children != null) for (Node c : n.children) collectJunk(c, out);
+    }
+
+    private void findJunk() {
+        Node root = stack.peekLast();
+        if (root == null) { addBubble("assistant", "Scan a folder first, then I can find junk in it."); return; }
+        List<Node> junk = new ArrayList<>();
+        collectJunk(root, junk);
+        junk.removeIf(n -> isProtected(n.path) || n.size == 0);
+        junk.sort(Comparator.comparingLong((Node n) -> n.size).reversed());
+        if (rootPane.getRight() == null) toggleAssistant();
+        if (junk.isEmpty()) {
+            addBubble("assistant", "No obvious junk found by the built-in rules (cache/build folders, logs, temp files, thumbnail caches, installers left in Downloads).");
+            clearProposals();
+            return;
+        }
+        long sum = 0;
+        for (Node n : junk) sum += n.size;
+        addBubble("assistant", "Found " + junk.size() + " likely-junk item(s) — about " + Sizes.human(sum)
+                + " — using built-in rules (cache/build folders, logs, temp files, thumbnail caches, Downloads installers). "
+                + "These are commonly safe to remove; tick the ones you want and Recycle them.");
+        showProposals(junk);
+        status.setText(junk.size() + " likely-junk item(s)  ·  " + Sizes.human(sum) + " reclaimable  ·  approve below");
+    }
+
+    // Headless hook: -Ddiskbloom.junk prints the rule-based junk list and exits.
+    private void runJunk() {
+        Node root = stack.peekLast();
+        if (root == null) { Platform.exit(); return; }
+        List<Node> junk = new ArrayList<>();
+        collectJunk(root, junk);
+        junk.removeIf(n -> isProtected(n.path) || n.size == 0);
+        junk.sort(Comparator.comparingLong((Node n) -> n.size).reversed());
+        long sum = 0;
+        System.out.println("=== JUNK in " + root.path + " ===");
+        for (Node n : junk) { sum += n.size; System.out.println((n.dir ? "[dir] " : "      ") + Sizes.human(n.size) + "  " + n.path); }
+        System.out.println("items: " + junk.size() + ", total: " + Sizes.human(sum));
+        Platform.exit();
     }
 
     // ---- actions ---------------------------------------------------------
