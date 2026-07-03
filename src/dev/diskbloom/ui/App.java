@@ -159,7 +159,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.11.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.12.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export CSV");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private boolean typesMode;                         // showing the file-type breakdown pane
@@ -611,20 +611,51 @@ public class App extends Application {
     private VBox buildStartPane() {
         Label title = new Label("diskbloom");
         title.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:32px; -fx-font-weight:bold;");
-        Label sub = new Label("Pick a drive or folder to see what's using space");
+        Label sub = new Label("Pick a drive to see what's using space  ·  or Open folder… above");
         sub.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:14px;");
-        HBox drives = new HBox(10);
+        VBox drives = new VBox(10);
         drives.setAlignment(Pos.CENTER);
+        drives.setMaxWidth(580);
         for (File r : File.listRoots()) {
             if (!r.exists()) continue;
-            Button b = new Button(r.getPath());
-            b.setOnAction(e -> openOrScan(r.toPath()));
-            drives.getChildren().add(b);
+            drives.getChildren().add(driveCard(r.toPath()));
         }
-        VBox v = new VBox(18, title, sub, drives);
+        VBox v = new VBox(20, title, sub, drives);
         v.setAlignment(Pos.CENTER);
         v.setStyle("-fx-background-color:" + BG + ";");
         return v;
+    }
+
+    // A clickable drive row: name, a used/total bar, free space, and a "cached" badge when we can open it instantly.
+    private HBox driveCard(Path root) {
+        long total = 0, usable = 0;
+        try { FileStore fs = Files.getFileStore(root); total = fs.getTotalSpace(); usable = fs.getUsableSpace(); } catch (Exception ignore) { }
+        long used = total - usable;
+
+        Label name = new Label(root.toString());
+        name.setMinWidth(52);
+        name.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:16px; -fx-font-weight:bold;");
+        ProgressBar bar = new ProgressBar(total > 0 ? (double) used / total : 0);
+        bar.setPrefHeight(10);
+        bar.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(bar, Priority.ALWAYS);
+        Label info = new Label(total > 0 ? Sizes.human(usable) + " free of " + Sizes.human(total) : "unavailable");
+        info.setMinWidth(160);
+        info.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:12px;");
+        Label badge = new Label(cachedFor(root) != null ? "cached ✓" : "");
+        badge.setMinWidth(58);
+        badge.setStyle("-fx-text-fill:#6fae8a; -fx-font-size:11px; -fx-font-weight:bold;");
+
+        HBox card = new HBox(14, name, bar, info, badge);
+        card.setAlignment(Pos.CENTER_LEFT);
+        // card must be lighter than the progress-bar track (#2a2a2c) so the unfilled part of the bar is visible
+        String base = "-fx-background-color:#33343a; -fx-background-radius:8; -fx-border-radius:8; -fx-border-color:#3f4048; -fx-border-width:1; -fx-cursor:hand; -fx-padding:14 18;";
+        String hover = base.replace("#33343a", "#3c3d45").replace("#3f4048", "#4f505a");
+        card.setStyle(base);
+        card.setOnMouseEntered(e -> card.setStyle(hover));
+        card.setOnMouseExited(e -> card.setStyle(base));
+        card.setOnMouseClicked(e -> openOrScan(root));
+        return card;
     }
 
     private VBox buildScanPane() {
