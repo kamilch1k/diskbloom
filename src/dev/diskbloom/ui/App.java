@@ -79,13 +79,13 @@ public class App extends Application {
 
     private static final String BG = "#1e1e1e", PANEL = "#252526", LINE = "#3a3a3a",
             CONTAINER = "#242424", FG = "#e6e6e6", DIM = "#9a9a9a";
-    private static final int MAX_DEPTH = 6;
-    private static final double MIN_SUBDIV = 28, MIN_LEAF = 3;
+    private static final int MAX_DEPTH = 4;
+    private static final double MIN_SUBDIV = 38, MIN_LEAF = 3, GAP = 2, ARC = 5;
 
     private enum Cat {
         VIDEO("Video", "#7f77dd"), IMAGE("Images", "#1d9e75"), AUDIO("Audio", "#d4537e"),
         ARCHIVE("Archives", "#ba7517"), CODE("Code", "#378add"), DOC("Documents", "#639922"),
-        APP("Apps & binaries", "#6e7b8b"), FOLDER("Folders", "#565b62"), OTHER("Other", "#7c7c7c");
+        APP("Apps & binaries", "#6d8bb0"), FOLDER("Folders", "#565b62"), OTHER("Other", "#857e76");
         final String label; final Color color;
         Cat(String label, String hex) { this.label = label; this.color = Color.web(hex); }
     }
@@ -538,33 +538,44 @@ public class App extends Application {
     }
 
     private void drawFolder(GraphicsContext g, Tile t) {
+        double x = t.x() + GAP, y = t.y() + GAP, w = t.w() - GAP * 2, h = t.h() - GAP * 2;
+        if (w <= 0 || h <= 0) return;
         g.setFill(Color.web(CONTAINER));
-        g.fillRect(t.x(), t.y(), t.w(), t.h());
-        boolean sel = t.node() == selected;
-        g.setStroke(sel ? Color.WHITE : Color.web("#111111"));
-        g.setLineWidth(sel ? 2.5 : 1);
-        g.strokeRect(t.x() + 0.5, t.y() + 0.5, t.w() - 1, t.h() - 1);
-        if (t.h() > 18 && t.w() > 52) {
-            g.setFill(Color.web("#cfcfcf"));
+        g.fillRoundRect(x, y, w, h, ARC, ARC);
+        if (t.node() == selected) {
+            g.setStroke(Color.WHITE);
+            g.setLineWidth(2);
+            g.strokeRoundRect(x + 1, y + 1, w - 2, h - 2, ARC, ARC);
+        }
+        if (h > 18 && w > 52) {
+            g.setFill(Color.web("#c2c2c2"));
             g.setFont(Font.font("Segoe UI", FontWeight.SEMI_BOLD, 11));
-            g.fillText(clip(t.node().name + "\\", t.w() - 10), t.x() + 5, t.y() + 12);
+            g.fillText(clip(t.node().name + "\\", w - 12), x + 7, y + 13);
         }
     }
 
     private void drawLeaf(GraphicsContext g, Tile t) {
-        boolean sel = t.node() == selected;
-        g.setFill(t.color());
-        g.fillRect(t.x(), t.y(), t.w(), t.h());
-        g.setStroke(sel ? Color.WHITE : Color.web(BG));
-        g.setLineWidth(sel ? 2.5 : 1);
-        g.strokeRect(t.x(), t.y(), t.w(), t.h());
-        if (t.w() > 46 && t.h() > 22) {
-            g.setFill(luminance(t.color()) > 0.55 ? Color.web("#141414") : Color.web("#f6f6f6"));
+        Color c = shade(t.color(), t.node());
+        if (t.w() < 7 || t.h() < 7) { // too small for a gap/round -> plain fill so dense areas stay solid, not dotty
+            g.setFill(c);
+            g.fillRect(t.x(), t.y(), t.w(), t.h());
+            return;
+        }
+        double x = t.x() + GAP, y = t.y() + GAP, w = t.w() - GAP * 2, h = t.h() - GAP * 2;
+        g.setFill(c);
+        g.fillRoundRect(x, y, w, h, ARC, ARC);
+        if (t.node() == selected) {
+            g.setStroke(Color.WHITE);
+            g.setLineWidth(2);
+            g.strokeRoundRect(x + 1, y + 1, w - 2, h - 2, ARC, ARC);
+        }
+        if (w > 46 && h > 22) {
+            g.setFill(luminance(c) > 0.55 ? Color.web("#141414") : Color.web("#f6f6f6"));
             g.setFont(Font.font("Segoe UI", FontWeight.SEMI_BOLD, 12));
-            g.fillText(clip(t.node().name + (t.node().dir ? "\\" : ""), t.w() - 12), t.x() + 6, t.y() + 16);
-            if (t.h() > 36) {
+            g.fillText(clip(t.node().name + (t.node().dir ? "\\" : ""), w - 12), x + 6, y + 16);
+            if (h > 36) {
                 g.setFont(Font.font("Segoe UI", 11));
-                g.fillText(Sizes.human(t.node().size), t.x() + 6, t.y() + 30);
+                g.fillText(Sizes.human(t.node().size), x + 6, y + 30);
             }
         }
     }
@@ -693,6 +704,13 @@ public class App extends Application {
 
     private static double luminance(Color c) {
         return 0.299 * c.getRed() + 0.587 * c.getGreen() + 0.114 * c.getBlue();
+    }
+
+    // subtle per-tile brightness variation so a folder full of one file type
+    // reads as a mosaic instead of a flat wall
+    private static Color shade(Color base, Node n) {
+        double f = 0.9 + ((n.name.hashCode() >>> 24) & 0xFF) / 255.0 * 0.2;
+        return base.deriveColor(0, 1, f, 1);
     }
 
     private static String rgb(Color c) {
