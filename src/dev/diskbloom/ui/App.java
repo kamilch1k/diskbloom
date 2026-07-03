@@ -136,6 +136,14 @@ public class App extends Application {
     private boolean listView = true;
     private final Button viewBtn = new Button("Map view");
 
+    private final ComboBox<String> driveBox = new ComboBox<>();
+    private final TextField addressField = new TextField();
+    private final TextField searchField = new TextField();
+    private Node browseRoot;          // non-null while the list is live-browsing the filesystem
+    private List<Node> searchHits;    // non-null while showing search results
+    private String searchLabel = "";
+    private static final int SEARCH_CAP = 3000;
+
     private BorderPane rootPane;
     private final Button assistantBtn = new Button("Assistant");
     private VBox assistantPanel;
@@ -165,14 +173,29 @@ public class App extends Application {
     private record Tile(Node node, double x, double y, double w, double h, Color color, int depth, boolean leaf) {}
 
     public static void main(String[] args) {
+        if (System.getProperty("diskbloom.selftest") != null) { selfTest(); return; }
         launch(args);
+    }
+
+    // java -ea -Ddiskbloom.selftest=1 --add-modules javafx.controls,javafx.swing -cp out dev.diskbloom.ui.App
+    private static void selfTest() {
+        assert isProtected(Paths.get("C:\\cc\\diskbloom\\.git\\objects\\ab\\cd")) : ".git guarded";
+        assert isProtected(Paths.get("C:\\Windows\\System32\\evil.dll")) : "system guarded";
+        assert isProtected(Paths.get("C:\\Program Files\\App\\a.exe")) : "program files guarded";
+        assert !isProtected(Paths.get("C:\\Users\\me\\Downloads\\big.iso")) : "downloads allowed";
+        Node javaFile = Scanner.shallow(Paths.get("C:\\x\\App.java"));
+        assert parseQuery(".java").test(javaFile) && parseQuery("*.java").test(javaFile) : "ext match";
+        assert parseQuery("app").test(javaFile) : "name substring";
+        assert parseQuery("type:code").test(javaFile) : "type match";
+        assert !parseQuery(".mp4").test(javaFile) : "ext non-match";
+        System.out.println("App self-check OK");
     }
 
     @Override
     public void start(Stage stage) {
         rootPane = new BorderPane();
         rootPane.setStyle("-fx-background-color:" + BG + ";");
-        rootPane.setTop(buildToolbar(stage));
+        rootPane.setTop(new VBox(buildToolbar(stage), buildBrowseBar()));
         rootPane.setLeft(buildSidebar());
         rootPane.setCenter(buildCenter());
         rootPane.setBottom(buildStatusBar());
@@ -186,6 +209,8 @@ public class App extends Application {
         assistantPanel = buildAssistantPanel();
         initAssistant();
 
+        String browse = System.getProperty("diskbloom.browse");
+        if (browse != null) { browseTo(Paths.get(browse)); if (shotPath != null) Platform.runLater(this::exportAndExit); return; }
         List<String> params = getParameters().getRaw();
         if (!params.isEmpty()) { scan(Paths.get(params.get(0))); return; }
         ScanCache.Cached cached = ScanCache.load(cacheFile());
@@ -213,6 +238,9 @@ public class App extends Application {
         selected = null;
         biggestMode = false;
         biggestBtn.setText("Biggest files");
+        browseRoot = null;
+        searchHits = null; searchLabel = "";
+        addressField.setText(cached.root().path.toString());
         showResults();
         showCurrent();
         buildTree(cached.root());
@@ -227,7 +255,7 @@ public class App extends Application {
         open.setOnAction(e -> chooseAndScan(stage));
         Button rescanBtn = new Button("Rescan");
         rescanBtn.setOnAction(e -> { Node r = stack.peekLast(); scan(r != null ? r.path : systemRoot()); });
-        upBtn.setOnAction(e -> { if (stack.size() > 1) { stack.pop(); selected = null; showCurrent(); } });
+        upBtn.setOnAction(e -> goUp());
         upBtn.setDisable(true);
         crumb.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:13px;");
         HBox.setHgrow(crumb, Priority.ALWAYS);
@@ -241,6 +269,38 @@ public class App extends Application {
         bar.setPadding(new Insets(8, 12, 8, 12));
         bar.setStyle("-fx-background-color:#2b2b2b; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
         return bar;
+    }
+
+    private HBox buildBrowseBar() {
+        driveBox.setPromptText("Drive");
+        for (File r : File.listRoots()) if (r.exists()) driveBox.getItems().add(r.getPath());
+        driveBox.setOnAction(e -> { String d = driveBox.getValue(); if (d != null) browseTo(Paths.get(d)); });
+
+        addressField.setPromptText("Path — e.g. C:\\Users  (Enter to open)");
+        HBox.setHgrow(addressField, Priority.ALWAYS);
+        addressField.setOnAction(e -> go(addressField.getText()));
+        Button goBtn = new Button("Go");
+        goBtn.setOnAction(e -> go(addressField.getText()));
+
+        searchField.setPromptText("Search  ·  name, .mp4, or type:video");
+        searchField.setPrefWidth(240);
+        searchField.setOnAction(e -> runSearch(searchField.getText()));
+        Button clearBtn = new Button("✕");
+        clearBtn.setTooltip(new Tooltip("Clear search"));
+        clearBtn.setOnAction(e -> { searchField.clear(); clearSearch(); });
+
+        HBox bar = new HBox(8, driveBox, addressField, goBtn, searchField, clearBtn);
+        bar.setAlignment(Pos.CENTER_LEFT);
+        bar.setPadding(new Insets(6, 12, 6, 12));
+        bar.setStyle("-fx-background-color:#262626; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
+        return bar;
+    }
+
+    private void go(String text) {
+        if (text == null || text.isBlank()) return;
+        Path p = Paths.get(text.trim());
+        if (Files.exists(p)) browseTo(p);
+        else status.setText("No such path: " + text.trim());
     }
 
     private VBox buildSidebar() {
@@ -264,7 +324,7 @@ public class App extends Application {
         list.setStyle("-fx-control-inner-background:" + PANEL + "; -fx-background-color:" + PANEL + ";");
         list.setCellFactory(lv -> new ItemCell());
         list.setOnMouseClicked(e -> {
-            if (e.getClickCount() == 2) drill(list.getSelectionModel().getSelectedItem());
+            if (e.getClickCount() == 2) navigateInto(list.getSelectionModel().getSelectedItem());
         });
         list.getSelectionModel().selectedItemProperty().addListener((o, ov, nv) -> {
             selected = nv;
@@ -390,7 +450,7 @@ public class App extends Application {
         listView = !listView;
         viewBtn.setText(listView ? "Map view" : "List view");
         applyView();
-        if (listView) buildTree(stack.peekLast());
+        if (listView) rebuildTree();
         else render();
     }
 
@@ -406,7 +466,10 @@ public class App extends Application {
         barCol.setPrefWidth(200);
         barCol.setSortable(false);
         TreeTableColumn<Node, String> sizeCol = new TreeTableColumn<>("Size");
-        sizeCol.setCellValueFactory(p -> new ReadOnlyStringWrapper(Sizes.human(p.getValue().getValue().size)));
+        sizeCol.setCellValueFactory(p -> {
+            Node v = p.getValue().getValue();
+            return new ReadOnlyStringWrapper(v.dir && v.size == 0 ? "" : Sizes.human(v.size)); // live folder size unknown
+        });
         sizeCol.setPrefWidth(90);
         sizeCol.setStyle("-fx-alignment: CENTER-RIGHT;");
         tree.getColumns().add(nameCol);
@@ -416,6 +479,12 @@ public class App extends Application {
         tree.setOnContextMenuRequested(e -> {
             TreeItem<Node> it = tree.getSelectionModel().getSelectedItem();
             if (it != null) menuFor(it.getValue()).show(tree, e.getScreenX(), e.getScreenY());
+        });
+        tree.setOnMouseClicked(e -> {
+            if (e.getClickCount() == 2) {
+                TreeItem<Node> it = tree.getSelectionModel().getSelectedItem();
+                if (it != null) navigateInto(it.getValue());
+            }
         });
     }
 
@@ -428,17 +497,18 @@ public class App extends Application {
 
     private static TreeItem<Node> lazyItem(Node n) {
         TreeItem<Node> item = new TreeItem<>(n) {
-            @Override public boolean isLeaf() { return !(n.dir && n.children != null && !n.children.isEmpty()); }
+            @Override public boolean isLeaf() { return !n.dir; }   // folders always show a disclosure arrow
         };
-        if (n.dir && n.children != null && !n.children.isEmpty()) {
-            item.expandedProperty().addListener((obs, was, is) -> {
-                if (is && item.getChildren().isEmpty()) {
+        if (n.dir) item.expandedProperty().addListener((obs, was, is) -> {
+            if (is && item.getChildren().isEmpty()) {
+                if (n.children == null) Scanner.listChildren(n);   // live-load from disk on first expand
+                if (n.children != null) {
                     List<Node> kids = new ArrayList<>(n.children);
-                    kids.sort(Comparator.comparingLong((Node c) -> c.size).reversed());
+                    kids.sort(Scanner.BROWSE_ORDER);
                     for (Node c : kids) item.getChildren().add(lazyItem(c));
                 }
-            });
-        }
+            }
+        });
         return item;
     }
 
@@ -480,6 +550,9 @@ public class App extends Application {
             selected = null;
             biggestMode = false;
             biggestBtn.setText("Biggest files");
+            browseRoot = null;
+            searchHits = null; searchLabel = "";
+            addressField.setText(result.path.toString());
             showResults();
             showCurrent();
             buildTree(result);
@@ -491,7 +564,10 @@ public class App extends Application {
             }, "diskbloom-cache-save").start();
             String ask = System.getProperty("diskbloom.ask");
             if (ask != null) { runAsk(ask); return; }
+            if (System.getProperty("diskbloom.analyze") != null) { runAnalyze(); return; }
             if (System.getProperty("diskbloom.biggest") != null) enterBiggest();
+            String search = System.getProperty("diskbloom.search");
+            if (search != null) runSearch(search);
             if (System.getProperty("diskbloom.assistant") != null) toggleAssistant();
             if (System.getProperty("diskbloom.testproposals") != null) { toggleAssistant(); injectTestProposals(); }
             if (shotPath != null) Platform.runLater(this::exportAndExit);
@@ -545,6 +621,53 @@ public class App extends Application {
         render();
     }
 
+    // ---- live file browsing (Explorer-style, no scan needed) ------------
+
+    /** Open a folder live (immediate children listed from disk, folders lazily on expand). */
+    private void browseTo(Path p) {
+        if (p == null) return;
+        clearSearchState();
+        Node n = Scanner.shallow(p);
+        if (!n.dir) { Path par = p.getParent(); if (par == null) return; n = Scanner.shallow(par); }
+        Scanner.listChildren(n);
+        browseRoot = n;
+        biggestMode = false;
+        biggestBtn.setText("Biggest files");
+        selected = null;
+        if (!listView) { listView = true; viewBtn.setText("Map view"); }
+
+        addressField.setText(n.path.toString());
+        setDriveUsage(n.path);
+        updateSidebar(n);
+        currentTotal = 0;                          // live folder size is unknown until scanned
+        crumb.setText(n.path.toString());
+        upBtn.setDisable(n.path.getParent() == null);
+
+        List<Node> kids = n.children != null ? n.children : List.of();
+        dominant.clear();
+        for (Node k : kids) dominant.put(k, catOf(k));   // shallow: file's own type, folder -> FOLDER
+        list.getItems().setAll(kids);
+        catSums.clear();
+        updateLegend();
+
+        showResults();
+        buildTree(n);
+        status.setText("Browsing " + n.path + "  ·  double-click a folder to open, right-click to scan or delete");
+    }
+
+    private void goUp() {
+        if (browseRoot != null) { Path par = browseRoot.path.getParent(); if (par != null) browseTo(par); return; }
+        if (stack.size() > 1) { stack.pop(); selected = null; showCurrent(); if (listView) buildTree(stack.peek()); }
+    }
+
+    /** Double-click a folder: live-browse it when browsing, else drill within the scan. */
+    private void navigateInto(Node n) {
+        if (n == null || !n.dir) return;
+        if (browseRoot != null) { browseTo(n.path); return; }
+        drill(n);
+        if (listView) buildTree(stack.peek());
+    }
+
     // ---- rendering -------------------------------------------------------
 
     private void render() {
@@ -552,7 +675,9 @@ public class App extends Application {
         topTiles.clear();
         double W = canvas.getWidth(), H = canvas.getHeight();
         if (W >= 2 && H >= 2) {
-            if (biggestMode) {
+            if (searchHits != null) {
+                if (!searchHits.isEmpty()) layoutFlat(searchHits, W, H);
+            } else if (biggestMode) {
                 if (biggestFiles != null && !biggestFiles.isEmpty()) layoutFlat(biggestFiles, W, H);
             } else {
                 Node cur = stack.peek();
@@ -840,7 +965,8 @@ public class App extends Application {
             + "each on its own line, formatted exactly as: SUGGEST_DELETE: <full path>  (copy the full path "
             + "verbatim from the summary). Only suggest things clearly safe to remove (caches, temp files, "
             + "downloads, old installers, logs); never OS, system, or program files. Keep prose short. The user "
-            + "reviews and approves every deletion; you cannot delete anything yourself.";
+            + "reviews and approves every deletion; you cannot delete anything yourself. Never suggest OS, "
+            + "system, program, or version-control (.git) files.";
 
     private VBox buildAssistantPanel() {
         Label title = new Label("Assistant");
@@ -861,7 +987,12 @@ public class App extends Application {
         VBox.setVgrow(chatScroll, Priority.ALWAYS);
 
         VBox presets = new VBox(6);
-        for (String p : new String[]{"What's using space?", "What's safe to delete?", "Find big old files"}) {
+        Button analyzeBtn = new Button("Analyze my biggest files");
+        analyzeBtn.setMaxWidth(Double.MAX_VALUE);
+        analyzeBtn.getStyleClass().add("accent");
+        analyzeBtn.setOnAction(e -> analyzeCleanup());
+        presets.getChildren().add(analyzeBtn);
+        for (String p : new String[]{"What's using space?", "What's safe to delete?"}) {
             Button b = new Button(p);
             b.setMaxWidth(Double.MAX_VALUE);
             b.setStyle("-fx-font-size:11px;");
@@ -931,13 +1062,16 @@ public class App extends Application {
         }
     }
 
-    private void ask(String question) {
-        if (question == null || question.isBlank()) return;
+    private void ask(String question) { ask(question, question); }
+
+    /** display is shown in the chat bubble; sent is the full prompt handed to the model. */
+    private void ask(String display, String sent) {
+        if (sent == null || sent.isBlank()) return;
         String model = modelPicker.getSelectionModel().getSelectedItem();
         if (model == null) { addBubble("assistant", "No model available — is Ollama running?"); return; }
         refreshContext();
-        addBubble("user", question);
-        history.add(new Ollama.Msg("user", question));
+        addBubble("user", display);
+        history.add(new Ollama.Msg("user", sent));
         questionField.clear();
         clearProposals();
         thinking = addBubble("assistant", "…thinking (the first reply loads the model, ~15s)");
@@ -977,6 +1111,45 @@ public class App extends Application {
         }, "ollama-ask").start();
     }
 
+    // ---- cleanup analyzer -----------------------------------------------
+
+    private void analyzeCleanup() {
+        Node root = stack.peekLast();
+        if (root == null) { addBubble("assistant", "Scan a folder first (Open folder, or pick a drive) — then I can analyze it."); return; }
+        ask("Analyze my biggest files and tell me what's safe to clean up.", cleanupPrompt(root, 30));
+    }
+
+    /** List the N biggest files with the KEEP/JUNK + SUGGEST_DELETE protocol for the cleanup analyzer. */
+    private static String cleanupPrompt(Node root, int n) {
+        PriorityQueue<Node> heap = new PriorityQueue<>(Comparator.comparingLong((Node x) -> x.size));
+        collectInto(root, heap);
+        List<Node> files = new ArrayList<>(heap);
+        files.sort(Comparator.comparingLong((Node x) -> x.size).reversed());
+        int k = Math.min(files.size(), n);
+        StringBuilder sb = new StringBuilder();
+        sb.append("Analyze my biggest files for cleanup. For EACH file, begin a line with KEEP or JUNK and a short reason. ")
+          .append("Then give a few lines of overall disk-cleaning advice. ")
+          .append("For every file clearly safe to remove (caches, temp files, old installers/downloads, logs, duplicates), ")
+          .append("also add a line formatted exactly: ").append(DELETE_TAG).append(" <full path>. ")
+          .append("Never suggest deleting OS, system, or program files.\n\nMy ").append(k).append(" biggest files:\n");
+        for (int i = 0; i < k; i++) { Node f = files.get(i); sb.append(Sizes.human(f.size)).append("  ").append(f.path).append('\n'); }
+        return sb.toString();
+    }
+
+    // Headless hook: -Ddiskbloom.analyze prints the cleanup analysis and exits.
+    private void runAnalyze() {
+        Node root = stack.peekLast();
+        if (root == null) { Platform.exit(); return; }
+        String prompt = cleanupPrompt(root, 30);
+        List<String> ms = modelPicker.getItems();
+        String model = ms.contains("qwen2.5:14b") ? "qwen2.5:14b" : (ms.isEmpty() ? "qwen2.5:14b" : ms.get(0));
+        new Thread(() -> {
+            try { System.out.println("=== CLEANUP ANALYSIS (" + model + ") ===\n" + Ollama.chat(model, SYSTEM_PROMPT, prompt)); }
+            catch (Exception ex) { System.out.println("analyze failed: " + ex); }
+            Platform.exit();
+        }, "ollama-analyze").start();
+    }
+
     private void handleResponse(String text) {
         if (thinking != null) { chatLog.getChildren().remove(thinking); thinking = null; }
         List<String> paths = new ArrayList<>();
@@ -996,7 +1169,22 @@ public class App extends Application {
         List<Node> found = new ArrayList<>();
         Node root = stack.peekLast();
         if (root != null && !paths.isEmpty()) matchWalk(root, new HashSet<>(paths), found);
+        int dropped = 0;
+        for (Iterator<Node> it = found.iterator(); it.hasNext(); ) if (isProtected(it.next().path)) { it.remove(); dropped++; }
+        if (dropped > 0) addBubble("assistant", "Note: I filtered out " + dropped
+                + " suggestion(s) pointing at system or version-control (.git) files — those aren't safe to remove here.");
         showProposals(found);
+    }
+
+    // A backstop for the approval gate: never let the model propose deleting OS,
+    // program, or version-control internals, however it phrases it.
+    private static boolean isProtected(Path p) {
+        String s = p.toString().toLowerCase().replace('/', '\\');
+        if (s.contains("\\.git\\") || s.endsWith("\\.git")) return true;
+        for (String bad : new String[]{"\\windows\\", "\\system32\\", "\\program files\\",
+                "\\program files (x86)\\", "\\programdata\\", "\\$recycle.bin\\"})
+            if (s.contains(bad)) return true;
+        return false;
     }
 
     private HBox addBubble(String role, String text) {
@@ -1134,6 +1322,7 @@ public class App extends Application {
     private void enterBiggest() {
         Node root = stack.peekLast();
         if (root == null) return;
+        searchHits = null; searchLabel = ""; browseRoot = null;
         PriorityQueue<Node> heap = new PriorityQueue<>(Comparator.comparingLong((Node n) -> n.size));
         collectInto(root, heap); // keeps only the top BIGGEST_N files, bounded memory
         List<Node> files = new ArrayList<>(heap);
@@ -1159,6 +1348,7 @@ public class App extends Application {
         for (Node f : files) catSums.merge(catOf(f), f.size, Long::sum);
         updateLegend();
         status.setText("Biggest individual files across the whole scan  ·  right-click for actions");
+        rebuildTree();
         render();
     }
 
@@ -1166,6 +1356,7 @@ public class App extends Application {
         biggestMode = false;
         biggestBtn.setText("Biggest files");
         showCurrent();
+        if (listView) rebuildTree();
     }
 
     private static void collectInto(Node n, PriorityQueue<Node> heap) {
@@ -1177,6 +1368,102 @@ public class App extends Application {
         if (n.children != null) for (Node c : n.children) collectInto(c, heap);
     }
 
+    // ---- search / filter ------------------------------------------------
+
+    private void runSearch(String q) {
+        if (q == null || q.isBlank()) { clearSearch(); return; }
+        Node root = stack.peekLast();
+        if (root == null) { status.setText("Scan a folder first (Open folder, or pick a drive) — then search it."); return; }
+        java.util.function.Predicate<Node> pred = parseQuery(q.trim());
+        List<Node> hits = new ArrayList<>();
+        searchCollect(root, pred, hits);
+        hits.sort(Comparator.comparingLong((Node n) -> n.size).reversed());
+        if (hits.size() > SEARCH_CAP) hits = new ArrayList<>(hits.subList(0, SEARCH_CAP));
+        searchHits = hits;
+        searchLabel = q.trim();
+        showSearchResults();
+    }
+
+    private static void searchCollect(Node n, java.util.function.Predicate<Node> pred, List<Node> out) {
+        if (!n.dir) { if (pred.test(n)) out.add(n); return; }
+        if (n.children != null) for (Node c : n.children) searchCollect(c, pred, out);
+    }
+
+    // name substring, ".ext" / "*.ext", or "type:video|image|audio|archive|code|doc|app"
+    private static java.util.function.Predicate<Node> parseQuery(String q) {
+        String s = q.toLowerCase();
+        if (s.startsWith("type:")) {
+            String want = s.substring(5).trim();
+            Cat cat = null;
+            for (Cat c : Cat.values())
+                if (!want.isEmpty() && (c.label.toLowerCase().contains(want) || c.name().toLowerCase().contains(want))) { cat = c; break; }
+            final Cat target = cat;
+            return n -> !n.dir && target != null && catOf(n) == target;
+        }
+        if (s.startsWith("*.") || s.startsWith(".")) {
+            String ext = s.substring(s.indexOf('.') + 1);
+            return n -> !n.dir && extOf(n).equals(ext);
+        }
+        return n -> !n.dir && n.name.toLowerCase().contains(s);
+    }
+
+    private static String extOf(Node n) {
+        int d = n.name.lastIndexOf('.');
+        return d >= 0 ? n.name.substring(d + 1).toLowerCase() : "";
+    }
+
+    private void showSearchResults() {
+        biggestMode = false;
+        biggestBtn.setText("Biggest files");
+        selected = null;
+
+        long sum = 0;
+        for (Node n : searchHits) sum += n.size;
+        currentTotal = sum;
+        crumb.setText("Search: \"" + searchLabel + "\"   ·   " + searchHits.size() + " file(s)"
+                + (searchHits.size() >= SEARCH_CAP ? " (showing largest " + SEARCH_CAP + ")" : ""));
+        sTitle.setText("Search results");
+        sSize.setText(Sizes.human(sum));
+        sCount.setText(searchHits.size() + " files");
+
+        dominant.clear();
+        for (Node n : searchHits) dominant.put(n, catOf(n));
+        list.getItems().setAll(searchHits);
+        catSums.clear();
+        for (Node n : searchHits) catSums.merge(catOf(n), n.size, Long::sum);
+        updateLegend();
+
+        rebuildTree();
+        showResults();
+        status.setText(searchHits.size() + " match(es) for \"" + searchLabel + "\"  ·  sorted by size  ·  right-click for actions");
+        render();
+    }
+
+    // Re-root the list/tree for the current mode (search, biggest, live browse, or scanned tree).
+    private void rebuildTree() {
+        List<Node> flat = searchHits != null ? searchHits : (biggestMode ? biggestFiles : null);
+        if (flat != null) {
+            Node base = stack.peekLast();
+            TreeItem<Node> r = new TreeItem<>(base);      // flat: matches listed directly, no drill-down
+            for (Node n : flat) r.getChildren().add(new TreeItem<>(n));
+            r.setExpanded(true);
+            tree.setRoot(r);
+        } else {
+            buildTree(browseRoot != null ? browseRoot : stack.peek());
+        }
+    }
+
+    /** Clear results and restore the previous view (browse folder or scanned tree). */
+    private void clearSearch() {
+        if (searchHits == null) return;
+        searchHits = null; searchLabel = "";
+        if (browseRoot != null) { Path p = browseRoot.path; browseRoot = null; browseTo(p); }
+        else { showCurrent(); if (listView) buildTree(stack.peek()); }
+    }
+
+    /** Drop results without restoring a view (for callers that set their own view next). */
+    private void clearSearchState() { searchHits = null; searchLabel = ""; }
+
     // ---- actions ---------------------------------------------------------
 
     private ContextMenu menuFor(Node n) {
@@ -1187,6 +1474,11 @@ public class App extends Application {
         reveal.setOnAction(a -> runQuietly(() -> new ProcessBuilder("explorer.exe", "/select," + f.getAbsolutePath()).start()));
         MenuItem del = new MenuItem("Delete to Recycle Bin…");
         del.setOnAction(a -> deleteToTrash(n));
+        if (n.dir) {
+            MenuItem scanItem = new MenuItem("Scan this folder");
+            scanItem.setOnAction(a -> scan(n.path));
+            return new ContextMenu(open, reveal, scanItem, new SeparatorMenuItem(), del);
+        }
         return new ContextMenu(open, reveal, new SeparatorMenuItem(), del);
     }
 
@@ -1275,8 +1567,9 @@ public class App extends Application {
             name.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:12px;");
             HBox.setHgrow(name, Priority.ALWAYS);
             name.setMaxWidth(Double.MAX_VALUE);
-            double pct = currentTotal > 0 ? 100.0 * n.size / currentTotal : 0;
-            Label size = new Label(Sizes.human(n.size) + "   " + String.format("%.0f%%", pct));
+            String sizeText = (n.dir && n.size == 0) ? "" : Sizes.human(n.size);   // live folder size unknown
+            String pctText = (currentTotal > 0 && n.size > 0) ? "   " + String.format("%.0f%%", 100.0 * n.size / currentTotal) : "";
+            Label size = new Label(sizeText + pctText);
             size.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px;");
             HBox row = new HBox(8, sw, name, size);
             row.setAlignment(Pos.CENTER_LEFT);

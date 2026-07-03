@@ -2,7 +2,7 @@
 
 A local, **LLM-powered file manager & disk cleaner** for Windows — browse your files, see what's eating space, and get on-device AI cleanup advice. Nothing leaves your machine.
 
-> **Status:** early work in progress — the scan engine and a JavaFX treemap UI both work today.
+> **Status:** work in progress — scanning, the treemap/bar views, a live file browser, search, and the local-LLM assistant + cleanup analyzer all work today.
 
 ![diskbloom showing a squarified treemap of a folder](docs/screenshot.png)
 
@@ -28,7 +28,10 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 - [x] Auto-scan on launch with a live progress overlay (files/bytes/current folder + cancel)
 - [x] Right-click actions — open, reveal in Explorer, delete to Recycle Bin (recoverable, with confirm)
 - [x] Biggest-files view — the largest individual files across the whole scan
-- [x] Optional local-LLM assistant (Ollama) — ask what's using space or what's safe to delete, then approve its suggested deletions; fully on-device
+- [x] Optional local-LLM assistant (Ollama) — a chat window to ask what's using space or what's safe to delete, then approve its suggested deletions; fully on-device
+- [x] Live file browser — address bar, drive picker, and lazy folder loading to navigate the whole PC, Explorer-style (right-click any folder to scan it)
+- [x] Search / filter — by name, extension (`.mp4`), or type (`type:video`); results shown largest-first
+- [x] Cleanup analyzer — the local LLM ranks your biggest files keep-vs-junk with reasons and cleaning advice; every suggested deletion is approval-gated, and a safety guard blocks system/`.git` paths
 - [x] Modern flat dark theme, and a cached last scan for instant relaunch (Rescan to refresh)
 - [ ] Raw NTFS MFT reading via Win32 FFI for WizTree-class scan speed
 - [ ] Hardlink / junction-aware accuracy

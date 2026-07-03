@@ -48,6 +48,47 @@ public final class Scanner {
         return new Walk(progress, cancel).run(root);
     }
 
+    // ---- live browsing (no full recursion): for the Explorer-style file view ----
+
+    /** Folders before files, then larger before smaller, then by name. */
+    public static final Comparator<Node> BROWSE_ORDER =
+            Comparator.comparing((Node n) -> !n.dir)
+                    .thenComparing(Comparator.comparingLong((Node n) -> n.size).reversed())
+                    .thenComparing(n -> n.name.toLowerCase());
+
+    /**
+     * A single node for one path, not recursed. Files carry their real size; a
+     * directory gets size 0 and null children (unknown until listed or scanned).
+     */
+    public static Node shallow(Path p) {
+        boolean isDir = Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS);
+        Node n = new Node(displayName(p), p, isDir);
+        if (!isDir) {
+            try { n.size = Files.size(p); } catch (IOException e) { /* unreadable -> 0 */ }
+        }
+        return n;
+    }
+
+    /**
+     * Populate a directory node's children with its immediate entries as shallow
+     * nodes (folders first, then largest-first). A no-op for files. An unreadable
+     * directory yields an empty child list, so callers can browse without a scan.
+     */
+    public static void listChildren(Node n) {
+        if (!n.dir) return;
+        List<Node> kids = new ArrayList<>();
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(n.path)) {
+            for (Path child : ds) {
+                if (Files.isSymbolicLink(child)) continue; // ponytail: skip links, matches scan()
+                kids.add(shallow(child));
+            }
+        } catch (IOException | RuntimeException e) {
+            // unreadable (usually perms) -> empty listing, keep going
+        }
+        kids.sort(BROWSE_ORDER);
+        n.children = kids;
+    }
+
     private static final class Cancelled extends RuntimeException {}
 
     private static final class Walk {
@@ -116,6 +157,28 @@ public final class Scanner {
     private static String displayName(Path p) {
         Path name = p.getFileName();
         return name == null ? p.toString() : name.toString(); // drive root (C:\) has a null file name
+    }
+
+    // self-check: java -ea -cp out dev.diskbloom.core.Scanner
+    public static void main(String[] args) throws Exception {
+        Path tmp = Files.createTempDirectory("dbscan");
+        Files.writeString(tmp.resolve("a.txt"), "hello");   // 5 bytes
+        Files.createDirectory(tmp.resolve("sub"));
+        Node full = scan(tmp);
+        assert full.size == 5 : "full size " + full.size;
+
+        Node sh = shallow(tmp);
+        assert sh.dir && sh.size == 0 && sh.children == null : "shallow dir is lazy";
+        listChildren(sh);
+        assert sh.children.size() == 2 : "listed " + sh.children.size();
+        assert sh.children.get(0).dir : "folders sort first";           // sub before a.txt
+        Node file = shallow(tmp.resolve("a.txt"));
+        assert !file.dir && file.size == 5 : "shallow file size " + file.size;
+
+        Files.delete(tmp.resolve("a.txt"));
+        Files.delete(tmp.resolve("sub"));
+        Files.delete(tmp);
+        System.out.println("Scanner self-check OK");
     }
 
     private Scanner() {}
