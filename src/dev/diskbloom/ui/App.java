@@ -3,6 +3,7 @@ package dev.diskbloom.ui;
 import dev.diskbloom.core.Scanner;
 import dev.diskbloom.core.Scanner.Node;
 import dev.diskbloom.core.Sizes;
+import dev.diskbloom.llm.Ollama;
 
 import javafx.application.Application;
 import javafx.application.Platform;
@@ -16,6 +17,7 @@ import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.ButtonType;
+import javafx.scene.control.ComboBox;
 import javafx.scene.control.ContextMenu;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
@@ -23,6 +25,9 @@ import javafx.scene.control.ListView;
 import javafx.scene.control.MenuItem;
 import javafx.scene.control.ProgressBar;
 import javafx.scene.control.SeparatorMenuItem;
+import javafx.scene.control.TextArea;
+import javafx.scene.control.TextField;
+import javafx.scene.control.Tooltip;
 import javafx.scene.image.WritableImage;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -117,6 +122,14 @@ public class App extends Application {
     private boolean biggestMode;
     private List<Node> biggestFiles;
 
+    private BorderPane rootPane;
+    private final Button assistantBtn = new Button("Assistant");
+    private VBox assistantPanel;
+    private final ComboBox<String> modelPicker = new ComboBox<>();
+    private final TextArea responseArea = new TextArea();
+    private final TextField questionField = new TextField();
+    private final Button askBtn = new Button("Ask");
+
     private final Deque<Node> stack = new ArrayDeque<>();
     private final List<Tile> tiles = new ArrayList<>();
     private final List<Tile> topTiles = new ArrayList<>();
@@ -137,17 +150,20 @@ public class App extends Application {
 
     @Override
     public void start(Stage stage) {
-        BorderPane root = new BorderPane();
-        root.setStyle("-fx-background-color:" + BG + ";");
-        root.setTop(buildToolbar(stage));
-        root.setLeft(buildSidebar());
-        root.setCenter(buildCenter());
-        root.setBottom(buildStatusBar());
+        rootPane = new BorderPane();
+        rootPane.setStyle("-fx-background-color:" + BG + ";");
+        rootPane.setTop(buildToolbar(stage));
+        rootPane.setLeft(buildSidebar());
+        rootPane.setCenter(buildCenter());
+        rootPane.setBottom(buildStatusBar());
 
-        scene = new Scene(root, 1180, 720, Color.web(BG));
+        scene = new Scene(rootPane, 1180, 720, Color.web(BG));
         stage.setTitle("diskbloom");
         stage.setScene(scene);
         stage.show();
+
+        assistantPanel = buildAssistantPanel();
+        initAssistant();
 
         List<String> params = getParameters().getRaw();
         scan(params.isEmpty() ? systemRoot() : Paths.get(params.get(0)));
@@ -170,7 +186,9 @@ public class App extends Application {
         HBox.setHgrow(crumb, Priority.ALWAYS);
 
         biggestBtn.setOnAction(e -> { if (biggestMode) exitBiggest(); else enterBiggest(); });
-        HBox bar = new HBox(10, open, upBtn, biggestBtn, crumb);
+        assistantBtn.setDisable(true);
+        assistantBtn.setOnAction(e -> toggleAssistant());
+        HBox bar = new HBox(10, open, upBtn, biggestBtn, crumb, assistantBtn);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(8, 12, 8, 12));
         bar.setStyle("-fx-background-color:#2b2b2b; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
@@ -353,7 +371,10 @@ public class App extends Application {
             biggestBtn.setText("Biggest files");
             showResults();
             showCurrent();
+            String ask = System.getProperty("diskbloom.ask");
+            if (ask != null) { runAsk(ask); return; }
             if (System.getProperty("diskbloom.biggest") != null) enterBiggest();
+            if (System.getProperty("diskbloom.assistant") != null) toggleAssistant();
             if (shotPath != null) Platform.runLater(this::exportAndExit);
         });
         task.setOnFailed(e -> { showStart(); crumb.setText("Scan failed: " + task.getException()); });
@@ -668,6 +689,154 @@ public class App extends Application {
         while (it.hasNext()) {
             if (sb.length() > 0) sb.append("  ›  ");
             sb.append(it.next().name);
+        }
+        return sb.toString();
+    }
+
+    // ---- assistant (local LLM via Ollama) -------------------------------
+
+    private static final String SYSTEM_PROMPT =
+            "You are diskbloom's local disk-cleanup assistant. You are given a summary of a disk scan. "
+            + "Answer the user's question concisely and practically. When asked what to delete, only suggest "
+            + "things clearly safe to remove (caches, temp files, downloads, old installers, logs) and never OS, "
+            + "system, or program files. Keep answers short. You cannot take actions yourself; the user reviews "
+            + "and approves everything.";
+
+    private VBox buildAssistantPanel() {
+        Label title = new Label("Assistant");
+        title.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:16px; -fx-font-weight:bold;");
+        modelPicker.setMaxWidth(Double.MAX_VALUE);
+
+        responseArea.setEditable(false);
+        responseArea.setWrapText(true);
+        responseArea.setFocusTraversable(false);
+        responseArea.setStyle("-fx-control-inner-background:#1c1c1c; -fx-text-fill:" + FG + "; -fx-font-size:12px;");
+        responseArea.setText("Ask what's using space, or what looks safe to delete.\nAnything to delete will go through an approval step.");
+        VBox.setVgrow(responseArea, Priority.ALWAYS);
+
+        VBox presets = new VBox(6);
+        for (String p : new String[]{"What's using space?", "What's safe to delete?", "Find big old files"}) {
+            Button b = new Button(p);
+            b.setMaxWidth(Double.MAX_VALUE);
+            b.setStyle("-fx-font-size:11px;");
+            b.setOnAction(e -> ask(p));
+            presets.getChildren().add(b);
+        }
+
+        questionField.setPromptText("Ask a question…");
+        HBox.setHgrow(questionField, Priority.ALWAYS);
+        askBtn.setOnAction(e -> ask(questionField.getText()));
+        questionField.setOnAction(e -> ask(questionField.getText()));
+        HBox askRow = new HBox(6, questionField, askBtn);
+
+        Label note = new Label("Local · nothing leaves your PC");
+        note.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:10px;");
+
+        VBox v = new VBox(8, title, modelPicker, presets, responseArea, askRow, note);
+        v.setPadding(new Insets(12));
+        v.setPrefWidth(360);
+        v.setStyle("-fx-background-color:" + PANEL + "; -fx-border-color:" + LINE + "; -fx-border-width:0 0 0 1;");
+        return v;
+    }
+
+    private void initAssistant() {
+        Thread t = new Thread(() -> {
+            List<String> ms;
+            try { ms = Ollama.models(); } catch (Exception e) { ms = List.of(); }
+            final List<String> models = ms;
+            Platform.runLater(() -> {
+                if (models.isEmpty()) {
+                    assistantBtn.setDisable(true);
+                    assistantBtn.setTooltip(new Tooltip("Start Ollama (localhost:11434) to enable the assistant"));
+                } else {
+                    modelPicker.getItems().setAll(models);
+                    modelPicker.getSelectionModel().select(models.contains("qwen2.5:14b") ? "qwen2.5:14b" : models.get(0));
+                    assistantBtn.setDisable(false);
+                }
+            });
+        }, "ollama-check");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void toggleAssistant() {
+        if (rootPane.getRight() == null) {
+            rootPane.setRight(assistantPanel);
+            assistantBtn.setText("Assistant ✕");
+        } else {
+            rootPane.setRight(null);
+            assistantBtn.setText("Assistant");
+        }
+    }
+
+    private void ask(String question) {
+        if (question == null || question.isBlank()) return;
+        String model = modelPicker.getSelectionModel().getSelectedItem();
+        if (model == null) { responseArea.setText("No model available. Is Ollama running?"); return; }
+        String prompt = "Disk scan summary:\n" + buildContext() + "\nQuestion: " + question;
+        responseArea.setText("Thinking… (the first query loads the model into memory, ~15s)");
+        askBtn.setDisable(true);
+        questionField.setDisable(true);
+        Task<String> task = new Task<>() {
+            @Override protected String call() throws Exception {
+                return Ollama.chat(model, SYSTEM_PROMPT, prompt);
+            }
+        };
+        task.setOnSucceeded(e -> { responseArea.setText(task.getValue()); askBtn.setDisable(false); questionField.setDisable(false); });
+        task.setOnFailed(e -> { responseArea.setText("Error: " + task.getException()); askBtn.setDisable(false); questionField.setDisable(false); });
+        Thread th = new Thread(task, "ollama-chat");
+        th.setDaemon(true);
+        th.start();
+    }
+
+    // Headless verification hook: -Ddiskbloom.ask="question" prints the answer and exits.
+    private void runAsk(String question) {
+        String prompt = "Disk scan summary:\n" + buildContext() + "\nQuestion: " + question;
+        List<String> ms = modelPicker.getItems();
+        String model = ms.contains("qwen2.5:14b") ? "qwen2.5:14b" : (ms.isEmpty() ? "qwen2.5:14b" : ms.get(0));
+        new Thread(() -> {
+            try { System.out.println("=== ASSISTANT (" + model + ") ===\n" + Ollama.chat(model, SYSTEM_PROMPT, prompt)); }
+            catch (Exception ex) { System.out.println("ask failed: " + ex); }
+            Platform.exit();
+        }, "ollama-ask").start();
+    }
+
+    private String buildContext() {
+        Node scanRoot = stack.peekLast();
+        StringBuilder sb = new StringBuilder();
+        if (scanRoot != null) {
+            sb.append("Scanned: ").append(scanRoot.path).append("  (").append(Sizes.human(scanRoot.size)).append(" total)\n");
+        }
+        if (!driveLbl.getText().isEmpty()) sb.append("Drive: ").append(driveLbl.getText()).append('\n');
+        long tot = 0;
+        for (long v : catSums.values()) tot += v;
+        if (tot > 0) {
+            sb.append("By type: ");
+            List<Map.Entry<Cat, Long>> es = new ArrayList<>(catSums.entrySet());
+            es.sort((a, b) -> Long.compare(b.getValue(), a.getValue()));
+            for (Map.Entry<Cat, Long> e : es) sb.append(e.getKey().label).append(' ').append(Sizes.human(e.getValue())).append(", ");
+            sb.append('\n');
+        }
+        if (scanRoot != null) {
+            sb.append("Largest folders:\n");
+            int n = 0;
+            if (scanRoot.children != null) {
+                for (Node c : scanRoot.children) {
+                    if (!c.dir) continue;
+                    sb.append("  ").append(Sizes.human(c.size)).append("  ").append(c.path).append('\n');
+                    if (++n >= 20) break;
+                }
+            }
+            PriorityQueue<Node> heap = new PriorityQueue<>(Comparator.comparingLong((Node x) -> x.size));
+            collectInto(scanRoot, heap);
+            List<Node> files = new ArrayList<>(heap);
+            files.sort(Comparator.comparingLong((Node x) -> x.size).reversed());
+            sb.append("Largest files:\n");
+            n = 0;
+            for (Node f : files) {
+                sb.append("  ").append(Sizes.human(f.size)).append("  ").append(f.path).append('\n');
+                if (++n >= 20) break;
+            }
         }
         return sb.toString();
     }

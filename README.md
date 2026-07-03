@@ -27,6 +27,7 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 - [x] Auto-scan on launch with a live progress overlay (files/bytes/current folder + cancel)
 - [x] Right-click actions — open, reveal in Explorer, delete to Recycle Bin (recoverable, with confirm)
 - [x] Biggest-files view — the largest individual files across the whole scan
+- [x] Optional local-LLM assistant (Ollama) — ask what's using space or what's safe to delete, fully on-device
 - [ ] Raw NTFS MFT reading via Win32 FFI for WizTree-class scan speed
 - [ ] Hardlink / junction-aware accuracy
 - [ ] Packaged installer (jpackage)
