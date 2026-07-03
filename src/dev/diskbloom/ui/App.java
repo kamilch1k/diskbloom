@@ -51,6 +51,7 @@ import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
 import javafx.stage.DirectoryChooser;
+import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 
 import javax.imageio.ImageIO;
@@ -158,7 +159,8 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.7.0";            // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.8.0";            // shown in the title bar + sidebar; bump per release
+    private final Button exportBtn = new Button("Export CSV");
     private final Button typesBtn = new Button("By type");
     private final Button bigOldBtn = new Button("Big & old");
     private boolean typesMode;                         // showing the file-type breakdown pane
@@ -238,6 +240,17 @@ public class App extends Application {
         Files.delete(j.resolve("app.log"));
         Files.delete(j.resolve("keep.txt"));
         Files.delete(j);
+
+        // CSV export: header, a real byte count, and RFC-4180 quoting
+        assert csvField("a,b").equals("\"a,b\"") : "csv quotes a comma field";
+        assert csvField("plain").equals("plain") : "csv leaves a plain field alone";
+        Path c = Files.createTempDirectory("dbcsv");
+        Files.writeString(c.resolve("a.txt"), "hi");   // 2 bytes
+        String csv = toCsv(Scanner.scan(c));
+        assert csv.startsWith("Path,Bytes,Size,Type") : "csv header";
+        assert csv.contains("a.txt") && csv.contains(",2,") : "csv file row with byte count";
+        Files.delete(c.resolve("a.txt"));
+        Files.delete(c);
 
         System.out.println("App self-check OK");
     }
@@ -322,7 +335,7 @@ public class App extends Application {
     /** True in the PNG-shot and headless test hooks — those skip the single-instance lock. */
     private boolean headlessMode() {
         if (shotPath != null) return true;
-        for (String k : new String[]{"selftest", "ask", "analyze", "dupes", "junk"})
+        for (String k : new String[]{"selftest", "ask", "analyze", "dupes", "junk", "exportcsv"})
             if (System.getProperty("diskbloom." + k) != null) return true;
         return false;
     }
@@ -396,11 +409,12 @@ public class App extends Application {
         bigOldBtn.setOnAction(e -> enterBigOld());
         typesBtn.setOnAction(e -> { if (typesMode) exitTypes(); else enterTypes(); });
         dupBtn.setOnAction(e -> findDuplicates());
+        exportBtn.setOnAction(e -> chooseAndExport(stage));
         viewBtn.setOnAction(e -> toggleView());
         assistantBtn.setDisable(true);
         assistantBtn.setOnAction(e -> toggleAssistant());
         settingsBtn.setOnAction(e -> showSettings());
-        HBox bar = new HBox(10, open, rescanBtn, upBtn, biggestBtn, bigOldBtn, typesBtn, dupBtn, viewBtn, crumb, assistantBtn, settingsBtn);
+        HBox bar = new HBox(10, open, rescanBtn, upBtn, biggestBtn, bigOldBtn, typesBtn, dupBtn, exportBtn, viewBtn, crumb, assistantBtn, settingsBtn);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(8, 12, 8, 12));
         bar.setStyle("-fx-background-color:#2b2b2b; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
@@ -712,6 +726,8 @@ public class App extends Application {
             if (System.getProperty("diskbloom.analyze") != null) { runAnalyze(); return; }
             if (System.getProperty("diskbloom.dupes") != null) { runDupes(); return; }
             if (System.getProperty("diskbloom.junk") != null) { runJunk(); return; }
+            String exportCsv = System.getProperty("diskbloom.exportcsv");
+            if (exportCsv != null) { runExport(exportCsv); return; }
             if (System.getProperty("diskbloom.biggest") != null) enterBiggest();
             if (System.getProperty("diskbloom.types") != null) enterTypes();
             if (System.getProperty("diskbloom.bigold") != null) enterBigOld();
@@ -1913,6 +1929,66 @@ public class App extends Application {
         System.out.println("=== JUNK in " + root.path + " ===");
         for (Node n : junk) { sum += n.size; System.out.println((n.dir ? "[dir] " : "      ") + Sizes.human(n.size) + "  " + n.path); }
         System.out.println("items: " + junk.size() + ", total: " + Sizes.human(sum));
+        Platform.exit();
+    }
+
+    // ---- CSV export -----------------------------------------------------
+
+    private void chooseAndExport(Stage stage) {
+        Node root = stack.peekLast();
+        if (root == null) { info("Scan a folder first, then export it to CSV."); return; }
+        FileChooser fc = new FileChooser();
+        fc.setTitle("Export scan as CSV");
+        fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV file", "*.csv"));
+        fc.setInitialFileName("diskbloom-" + safeName(root.name) + ".csv");
+        File f = fc.showSaveDialog(stage);
+        if (f == null) return;
+        try {
+            Files.writeString(f.toPath(), toCsv(root));
+            status.setText("Exported " + rowCount(root) + " rows (" + Sizes.human(root.size) + ") to " + f);
+        } catch (Exception e) {
+            info("Export failed: " + e.getMessage());
+        }
+    }
+
+    private static String safeName(String s) {
+        return s.replaceAll("[\\\\/:*?\"<>|]", "_");
+    }
+
+    /** Every file and folder in the tree as CSV: Path, Bytes, Size, Type. */
+    private static String toCsv(Node root) {
+        StringBuilder sb = new StringBuilder("Path,Bytes,Size,Type\n");
+        csvRows(root, sb);
+        return sb.toString();
+    }
+
+    private static void csvRows(Node n, StringBuilder sb) {
+        sb.append(csvField(n.path.toString())).append(',')
+          .append(n.size).append(',')
+          .append(csvField(Sizes.human(n.size))).append(',')
+          .append(n.dir ? "folder" : catOf(n).label).append('\n');
+        if (n.children != null) for (Node c : n.children) csvRows(c, sb);
+    }
+
+    // ponytail: RFC-4180 quoting — wrap in quotes and double any embedded quote.
+    private static String csvField(String s) {
+        if (s.indexOf(',') >= 0 || s.indexOf('"') >= 0 || s.indexOf('\n') >= 0)
+            return '"' + s.replace("\"", "\"\"") + '"';
+        return s;
+    }
+
+    private static int rowCount(Node n) {
+        int c = 1;
+        if (n.children != null) for (Node k : n.children) c += rowCount(k);
+        return c;
+    }
+
+    // Headless hook: -Ddiskbloom.exportcsv=<path> writes the CSV and exits.
+    private void runExport(String out) {
+        Node root = stack.peekLast();
+        try {
+            if (root != null) { Files.writeString(Paths.get(out), toCsv(root)); System.out.println("exported " + rowCount(root) + " rows to " + out); }
+        } catch (Exception e) { System.out.println("export failed: " + e); }
         Platform.exit();
     }
 

@@ -36,6 +36,7 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 - [x] Rule-based junk finder (no AI) — flags cache/build folders (`node_modules`, `__pycache__`, `.gradle`…), logs, temp files, thumbnail caches, and installers left in Downloads; same approval checklist and safety guard
 - [x] Modern flat dark theme, and a cached last scan for instant relaunch (Rescan to refresh)
 - [x] Single-instance (only one window at a time) and the version shown in the title bar and sidebar
+- [x] Export the scan to CSV (Path, Bytes, Size, Type — one row per file and folder) for opening in a spreadsheet
 - [ ] Raw NTFS MFT reading via Win32 FFI for WizTree-class scan speed
 - [ ] Hardlink / junction-aware accuracy
 - [ ] Packaged installer (jpackage)
