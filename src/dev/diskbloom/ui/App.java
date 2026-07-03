@@ -140,7 +140,10 @@ public class App extends Application {
     private final Button assistantBtn = new Button("Assistant");
     private VBox assistantPanel;
     private final ComboBox<String> modelPicker = new ComboBox<>();
-    private final TextArea responseArea = new TextArea();
+    private final VBox chatLog = new VBox(8);
+    private ScrollPane chatScroll;
+    private final List<Ollama.Msg> history = new ArrayList<>();
+    private javafx.scene.Node thinking;
     private final TextField questionField = new TextField();
     private final Button askBtn = new Button("Ask");
     private final VBox proposalsBox = new VBox(4);
@@ -176,7 +179,7 @@ public class App extends Application {
 
         scene = new Scene(rootPane, 1180, 720, Color.web(BG));
         Theme.apply(scene);
-        stage.setTitle("diskbloom");
+        stage.setTitle("diskbloom — local LLM file manager");
         stage.setScene(scene);
         stage.show();
 
@@ -842,14 +845,20 @@ public class App extends Application {
     private VBox buildAssistantPanel() {
         Label title = new Label("Assistant");
         title.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:16px; -fx-font-weight:bold;");
+        Button newChatBtn = new Button("New chat");
+        newChatBtn.setStyle("-fx-font-size:11px;");
+        newChatBtn.setOnAction(e -> newChat());
+        Region sp = new Region();
+        HBox.setHgrow(sp, Priority.ALWAYS);
+        HBox titleRow = new HBox(8, title, sp, newChatBtn);
+        titleRow.setAlignment(Pos.CENTER_LEFT);
         modelPicker.setMaxWidth(Double.MAX_VALUE);
 
-        responseArea.setEditable(false);
-        responseArea.setWrapText(true);
-        responseArea.setFocusTraversable(false);
-        responseArea.setStyle("-fx-control-inner-background:#1c1c1c; -fx-text-fill:" + FG + "; -fx-font-size:12px;");
-        responseArea.setText("Ask what's using space, or what looks safe to delete.\nAnything to delete will go through an approval step.");
-        VBox.setVgrow(responseArea, Priority.ALWAYS);
+        chatLog.setPadding(new Insets(4, 2, 4, 2));
+        chatScroll = new ScrollPane(chatLog);
+        chatScroll.setFitToWidth(true);
+        chatScroll.setStyle("-fx-background:" + PANEL + "; -fx-background-color:" + PANEL + ";");
+        VBox.setVgrow(chatScroll, Priority.ALWAYS);
 
         VBox presets = new VBox(6);
         for (String p : new String[]{"What's using space?", "What's safe to delete?", "Find big old files"}) {
@@ -860,8 +869,9 @@ public class App extends Application {
             presets.getChildren().add(b);
         }
 
-        questionField.setPromptText("Ask a question…");
+        questionField.setPromptText("Message…");
         HBox.setHgrow(questionField, Priority.ALWAYS);
+        askBtn.setText("Send");
         askBtn.getStyleClass().add("accent");
         askBtn.setOnAction(e -> ask(questionField.getText()));
         questionField.setOnAction(e -> ask(questionField.getText()));
@@ -874,7 +884,7 @@ public class App extends Application {
         pTitle.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px; -fx-font-weight:bold;");
         ScrollPane pScroll = new ScrollPane(proposalsBox);
         pScroll.setFitToWidth(true);
-        pScroll.setMaxHeight(170);
+        pScroll.setMaxHeight(150);
         pScroll.setStyle("-fx-background:" + PANEL + "; -fx-background-color:" + PANEL + ";");
         recycleBtn.setMaxWidth(Double.MAX_VALUE);
         recycleBtn.getStyleClass().add("danger");
@@ -883,10 +893,11 @@ public class App extends Application {
         proposalsSection.setVisible(false);
         proposalsSection.setManaged(false);
 
-        VBox v = new VBox(8, title, modelPicker, presets, responseArea, proposalsSection, askRow, note);
+        VBox v = new VBox(8, titleRow, modelPicker, chatScroll, proposalsSection, presets, askRow, note);
         v.setPadding(new Insets(12));
-        v.setPrefWidth(360);
+        v.setPrefWidth(370);
         v.setStyle("-fx-background-color:" + PANEL + "; -fx-border-color:" + LINE + "; -fx-border-width:0 0 0 1;");
+        newChat();
         return v;
     }
 
@@ -923,22 +934,35 @@ public class App extends Application {
     private void ask(String question) {
         if (question == null || question.isBlank()) return;
         String model = modelPicker.getSelectionModel().getSelectedItem();
-        if (model == null) { responseArea.setText("No model available. Is Ollama running?"); return; }
-        String prompt = "Disk scan summary:\n" + buildContext() + "\nQuestion: " + question;
-        responseArea.setText("Thinking… (the first query loads the model into memory, ~15s)");
+        if (model == null) { addBubble("assistant", "No model available — is Ollama running?"); return; }
+        refreshContext();
+        addBubble("user", question);
+        history.add(new Ollama.Msg("user", question));
+        questionField.clear();
         clearProposals();
+        thinking = addBubble("assistant", "…thinking (the first reply loads the model, ~15s)");
         askBtn.setDisable(true);
         questionField.setDisable(true);
+        List<Ollama.Msg> convo = new ArrayList<>(history);
         Task<String> task = new Task<>() {
             @Override protected String call() throws Exception {
-                return Ollama.chat(model, SYSTEM_PROMPT, prompt);
+                return Ollama.chat(model, convo);
             }
         };
-        task.setOnSucceeded(e -> { handleResponse(task.getValue()); askBtn.setDisable(false); questionField.setDisable(false); });
-        task.setOnFailed(e -> { responseArea.setText("Error: " + task.getException()); askBtn.setDisable(false); questionField.setDisable(false); });
+        task.setOnSucceeded(e -> { finishAsk(); handleResponse(task.getValue()); });
+        task.setOnFailed(e -> {
+            finishAsk();
+            if (thinking != null) { chatLog.getChildren().remove(thinking); thinking = null; }
+            addBubble("assistant", "Error: " + task.getException());
+        });
         Thread th = new Thread(task, "ollama-chat");
         th.setDaemon(true);
         th.start();
+    }
+
+    private void finishAsk() {
+        askBtn.setDisable(false);
+        questionField.setDisable(false);
     }
 
     // Headless verification hook: -Ddiskbloom.ask="question" prints the answer and exits.
@@ -954,6 +978,7 @@ public class App extends Application {
     }
 
     private void handleResponse(String text) {
+        if (thinking != null) { chatLog.getChildren().remove(thinking); thinking = null; }
         List<String> paths = new ArrayList<>();
         StringBuilder prose = new StringBuilder();
         for (String line : text.split("\n", -1)) {
@@ -965,11 +990,40 @@ public class App extends Application {
                 prose.append(line).append('\n');
             }
         }
-        responseArea.setText(prose.toString().strip());
+        history.add(new Ollama.Msg("assistant", text));
+        String p = prose.toString().strip();
+        addBubble("assistant", p.isEmpty() ? "(suggested deletions below)" : p);
         List<Node> found = new ArrayList<>();
         Node root = stack.peekLast();
         if (root != null && !paths.isEmpty()) matchWalk(root, new HashSet<>(paths), found);
         showProposals(found);
+    }
+
+    private HBox addBubble(String role, String text) {
+        boolean user = "user".equals(role);
+        Label b = new Label(text);
+        b.setWrapText(true);
+        b.setMaxWidth(255);
+        b.setStyle("-fx-background-color:" + (user ? "#3d5a8a" : "#2c2c2e") + "; -fx-text-fill:"
+                + (user ? "white" : FG) + "; -fx-padding:7 11 7 11; -fx-background-radius:12; -fx-font-size:12px;");
+        HBox row = new HBox(b);
+        row.setAlignment(user ? Pos.CENTER_RIGHT : Pos.CENTER_LEFT);
+        chatLog.getChildren().add(row);
+        Platform.runLater(() -> chatScroll.setVvalue(1.0));
+        return row;
+    }
+
+    private void newChat() {
+        history.clear();
+        chatLog.getChildren().clear();
+        clearProposals();
+        addBubble("assistant", "Hi — ask what's using space, what's safe to delete, or anything about your files. I can suggest deletions for you to approve.");
+    }
+
+    private void refreshContext() {
+        Ollama.Msg sys = new Ollama.Msg("system", SYSTEM_PROMPT + "\n\nCurrent folder scan:\n" + buildContext());
+        if (!history.isEmpty() && history.get(0).role().equals("system")) history.set(0, sys);
+        else history.add(0, sys);
     }
 
     private void showProposals(List<Node> nodes) {

@@ -1,6 +1,6 @@
 # diskbloom
 
-A fast, open-source disk-space analyzer for Windows — see what's eating your drive, beautifully.
+A local, **LLM-powered file manager & disk cleaner** for Windows — browse your files, see what's eating space, and get on-device AI cleanup advice. Nothing leaves your machine.
 
 > **Status:** early work in progress — the scan engine and a JavaFX treemap UI both work today.
 

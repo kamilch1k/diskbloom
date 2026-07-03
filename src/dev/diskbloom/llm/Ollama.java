@@ -29,11 +29,23 @@ public final class Ollama {
         return Json.fields(resp.body(), "name");
     }
 
-    /** One-shot chat; returns the assistant's text. Blocking — call off the UI thread. */
+    public record Msg(String role, String content) {}
+
+    /** One-shot chat with a system + user message. */
     public static String chat(String model, String system, String user) throws Exception {
-        String body = "{\"model\":\"" + Json.escape(model) + "\",\"stream\":false,\"messages\":["
-                + "{\"role\":\"system\",\"content\":\"" + Json.escape(system) + "\"},"
-                + "{\"role\":\"user\",\"content\":\"" + Json.escape(user) + "\"}]}";
+        return chat(model, List.of(new Msg("system", system), new Msg("user", user)));
+    }
+
+    /** Multi-turn chat over a full message history. Blocking — call off the UI thread. */
+    public static String chat(String model, List<Msg> messages) throws Exception {
+        StringBuilder arr = new StringBuilder();
+        for (int i = 0; i < messages.size(); i++) {
+            Msg m = messages.get(i);
+            if (i > 0) arr.append(',');
+            arr.append("{\"role\":\"").append(Json.escape(m.role()))
+               .append("\",\"content\":\"").append(Json.escape(m.content())).append("\"}");
+        }
+        String body = "{\"model\":\"" + Json.escape(model) + "\",\"stream\":false,\"messages\":[" + arr + "]}";
         HttpRequest req = HttpRequest.newBuilder(URI.create(BASE + "/api/chat"))
                 .timeout(Duration.ofMinutes(5))
                 .header("Content-Type", "application/json")
