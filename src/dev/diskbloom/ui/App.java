@@ -159,7 +159,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.12.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.13.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export CSV");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private boolean typesMode;                         // showing the file-type breakdown pane
@@ -297,6 +297,15 @@ public class App extends Application {
 
         String browse = System.getProperty("diskbloom.browse");
         if (browse != null) { browseTo(Paths.get(browse)); if (shotPath != null) Platform.runLater(this::exportAndExit); return; }
+        String measureDemo = System.getProperty("diskbloom.measuredemo");   // browse + measure child folders, for a shot
+        if (measureDemo != null) {
+            browseTo(Paths.get(measureDemo));
+            if (browseRoot != null && browseRoot.children != null)
+                for (Node c : browseRoot.children) if (c.dir) c.size = Scanner.sizeOf(c.path);
+            tree.refresh(); list.refresh();
+            if (shotPath != null) Platform.runLater(this::exportAndExit);
+            return;
+        }
         List<String> params = getParameters().getRaw();
         if (!params.isEmpty()) { scan(Paths.get(params.get(0))); return; }
         ScanCache.Cached cached = newestCache();
@@ -2113,9 +2122,30 @@ public class App extends Application {
         if (n.dir) {
             MenuItem scanItem = new MenuItem("Scan this folder");
             scanItem.setOnAction(a -> scan(n.path));
+            if (n.size == 0) {   // a browse folder whose size we haven't computed yet
+                MenuItem measure = new MenuItem("Measure size");
+                measure.setOnAction(a -> measureSize(n));
+                return new ContextMenu(open, reveal, measure, scanItem, new SeparatorMenuItem(), del);
+            }
             return new ContextMenu(open, reveal, scanItem, new SeparatorMenuItem(), del);
         }
         return new ContextMenu(open, reveal, new SeparatorMenuItem(), del);
+    }
+
+    // Compute one folder's size on demand (off-thread) and show it in place — Explorer never does this.
+    private void measureSize(Node n) {
+        status.setText("Measuring " + n.name + " …");
+        Thread t = new Thread(() -> {
+            long size = Scanner.sizeOf(n.path);
+            Platform.runLater(() -> {
+                n.size = size;
+                tree.refresh();
+                list.refresh();
+                status.setText(n.name + "  is  " + Sizes.human(size));
+            });
+        }, "diskbloom-measure");
+        t.setDaemon(true);
+        t.start();
     }
 
     private void deleteToTrash(Node n) {

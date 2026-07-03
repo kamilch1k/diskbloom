@@ -29,7 +29,7 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 - [x] Right-click actions — open, reveal in Explorer, delete to Recycle Bin (recoverable, with confirm)
 - [x] Analysis views (under the "Views" menu) — biggest files, "big & old" (largest files, least-recently-modified first), and a file-type breakdown (which extensions use the most space; click one to filter to those files)
 - [x] Optional local-LLM assistant (Ollama) — a chat window to ask what's using space or what's safe to delete, then approve its suggested deletions; fully on-device
-- [x] Live file browser — address bar, drive picker, and lazy folder loading to navigate the whole PC, Explorer-style (right-click any folder to scan it)
+- [x] Live file browser — address bar, drive picker, and lazy folder loading to navigate the whole PC, Explorer-style (right-click any folder to scan it, or "Measure size" to compute one folder's size in place — something Explorer won't do)
 - [x] Search / filter — by name, extension (`.mp4`), or type (`type:video`); results shown largest-first
 - [x] Cleanup analyzer — the local LLM ranks your biggest files keep-vs-junk (weighing size and age) with reasons and cleaning advice; every suggested deletion is approval-gated, and a safety guard blocks system/`.git` paths
 - [x] Duplicate finder — content-hash (SHA-256) detection of identical files across the scan; approve removing the redundant copies (one is always kept), safety-guarded and recoverable via the Recycle Bin

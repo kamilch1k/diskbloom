@@ -89,6 +89,26 @@ public final class Scanner {
         n.children = kids;
     }
 
+    /** Total bytes under a path, summed without building a Node tree (bounded memory). Skips symlinks. */
+    public static long sizeOf(Path root) {
+        long[] total = {0};
+        sumInto(root, total);
+        return total[0];
+    }
+
+    private static void sumInto(Path p, long[] total) {
+        if (Files.isSymbolicLink(p)) return;
+        if (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
+            try (DirectoryStream<Path> ds = Files.newDirectoryStream(p)) {
+                for (Path c : ds) sumInto(c, total);
+            } catch (IOException | RuntimeException e) {
+                // unreadable dir -> counts as 0, keep going
+            }
+        } else {
+            try { total[0] += Files.size(p); } catch (IOException e) { /* skip */ }
+        }
+    }
+
     private static final class Cancelled extends RuntimeException {}
 
     private static final class Walk {
@@ -174,6 +194,7 @@ public final class Scanner {
         assert sh.children.get(0).dir : "folders sort first";           // sub before a.txt
         Node file = shallow(tmp.resolve("a.txt"));
         assert !file.dir && file.size == 5 : "shallow file size " + file.size;
+        assert sizeOf(tmp) == 5 : "sizeOf " + sizeOf(tmp);   // matches the full-scan aggregate
 
         Files.delete(tmp.resolve("a.txt"));
         Files.delete(tmp.resolve("sub"));
