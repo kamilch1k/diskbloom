@@ -57,10 +57,13 @@ import javax.imageio.ImageIO;
 import java.awt.Desktop;
 import java.io.File;
 import java.io.InputStream;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.FileStore;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -155,6 +158,13 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
+    static final String VERSION = "0.6.0";            // shown in the title bar + sidebar; bump per release
+    private final Button typesBtn = new Button("By type");
+    private final Button bigOldBtn = new Button("Big & old");
+    private boolean typesMode;                         // showing the file-type breakdown pane
+    private ScrollPane typesPane;
+    private static FileLock instanceLock;              // held for the process lifetime (single-instance guard)
+
     private BorderPane rootPane;
     private final Button assistantBtn = new Button("Assistant");
     private VBox assistantPanel;
@@ -218,6 +228,14 @@ public class App extends Application {
 
     @Override
     public void start(Stage stage) {
+        System.out.println("diskbloom v" + VERSION + " starting");
+        if (!headlessMode() && !acquireInstanceLock()) {
+            Alert a = new Alert(Alert.AlertType.INFORMATION, "diskbloom is already running.", ButtonType.OK);
+            a.setHeaderText(null);
+            a.showAndWait();
+            Platform.exit();
+            return;
+        }
         rootPane = new BorderPane();
         rootPane.setStyle("-fx-background-color:" + BG + ";");
         rootPane.setTop(new VBox(buildToolbar(stage), buildBrowseBar()));
@@ -227,7 +245,7 @@ public class App extends Application {
 
         scene = new Scene(rootPane, 1180, 720, Color.web(BG));
         Theme.apply(scene);
-        stage.setTitle("diskbloom — local LLM file manager");
+        stage.setTitle("diskbloom v" + VERSION + " — local LLM file manager");
         stage.setScene(scene);
         stage.show();
 
@@ -285,6 +303,29 @@ public class App extends Application {
         } catch (Exception ignore) { }
     }
 
+    /** True in the PNG-shot and headless test hooks — those skip the single-instance lock. */
+    private boolean headlessMode() {
+        if (shotPath != null) return true;
+        for (String k : new String[]{"selftest", "ask", "analyze", "dupes"})
+            if (System.getProperty("diskbloom." + k) != null) return true;
+        return false;
+    }
+
+    // Single-instance guard: hold an exclusive lock on a file for the process lifetime.
+    private static boolean acquireInstanceLock() {
+        try {
+            String base = System.getenv("LOCALAPPDATA");
+            Path f = (base != null ? Paths.get(base) : Paths.get(System.getProperty("user.home")))
+                    .resolve("diskbloom").resolve("instance.lock");
+            Files.createDirectories(f.getParent());
+            FileChannel ch = FileChannel.open(f, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            FileLock lock = ch.tryLock();
+            if (lock == null) { ch.close(); return false; }
+            instanceLock = lock;   // keep the reference alive for the whole process
+            return true;
+        } catch (Exception e) { return true; }   // never block startup on a lock error
+    }
+
     private void showSettings() {
         CheckBox auto = new CheckBox("Scan automatically on launch");
         auto.setSelected(autoScan);
@@ -336,12 +377,14 @@ public class App extends Application {
         HBox.setHgrow(crumb, Priority.ALWAYS);
 
         biggestBtn.setOnAction(e -> { if (biggestMode) exitBiggest(); else enterBiggest(); });
+        bigOldBtn.setOnAction(e -> enterBigOld());
+        typesBtn.setOnAction(e -> { if (typesMode) exitTypes(); else enterTypes(); });
         dupBtn.setOnAction(e -> findDuplicates());
         viewBtn.setOnAction(e -> toggleView());
         assistantBtn.setDisable(true);
         assistantBtn.setOnAction(e -> toggleAssistant());
         settingsBtn.setOnAction(e -> showSettings());
-        HBox bar = new HBox(10, open, rescanBtn, upBtn, biggestBtn, dupBtn, viewBtn, crumb, assistantBtn, settingsBtn);
+        HBox bar = new HBox(10, open, rescanBtn, upBtn, biggestBtn, bigOldBtn, typesBtn, dupBtn, viewBtn, crumb, assistantBtn, settingsBtn);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(8, 12, 8, 12));
         bar.setStyle("-fx-background-color:#2b2b2b; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
@@ -383,6 +426,10 @@ public class App extends Application {
     private VBox buildSidebar() {
         Label brand = new Label("diskbloom");
         brand.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:16px; -fx-font-weight:bold;");
+        Label ver = new Label("v" + VERSION);
+        ver.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:10px;");
+        HBox brandRow = new HBox(6, brand, ver);
+        brandRow.setAlignment(Pos.BOTTOM_LEFT);
         sTitle.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:13px;");
         sTitle.setMaxWidth(Double.MAX_VALUE);
         sSize.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:26px; -fx-font-weight:bold;");
@@ -414,7 +461,7 @@ public class App extends Application {
         });
         VBox.setVgrow(list, Priority.ALWAYS);
 
-        VBox box = new VBox(4, brand, sTitle, sSize, sCount, driveBar, driveLbl,
+        VBox box = new VBox(4, brandRow, sTitle, sSize, sCount, driveBar, driveLbl,
                 divider(), byType, legendBar, legendRows, divider(), listTitle, list);
         box.setPadding(new Insets(12));
         box.setPrefWidth(300);
@@ -454,11 +501,15 @@ public class App extends Application {
         });
 
         configureTree();
+        typesPane = new ScrollPane();
+        typesPane.setFitToWidth(true);
+        typesPane.setVisible(false);
+        typesPane.setStyle("-fx-background:" + BG + "; -fx-background-color:" + BG + ";");
         startPane = buildStartPane();
         scanPane = buildScanPane();
         scanPane.setVisible(false);
         applyView();
-        return new StackPane(holder, tree, startPane, scanPane);
+        return new StackPane(holder, tree, typesPane, startPane, scanPane);
     }
 
     private VBox buildStartPane() {
@@ -519,8 +570,9 @@ public class App extends Application {
     private void showResults() { startPane.setVisible(false); scanPane.setVisible(false); applyView(); }
 
     private void applyView() {
-        holder.setVisible(!listView);
-        tree.setVisible(listView);
+        holder.setVisible(!listView && !typesMode);
+        tree.setVisible(listView && !typesMode);
+        if (typesPane != null) typesPane.setVisible(typesMode);
     }
 
     private void toggleView() {
@@ -644,6 +696,8 @@ public class App extends Application {
             if (System.getProperty("diskbloom.analyze") != null) { runAnalyze(); return; }
             if (System.getProperty("diskbloom.dupes") != null) { runDupes(); return; }
             if (System.getProperty("diskbloom.biggest") != null) enterBiggest();
+            if (System.getProperty("diskbloom.types") != null) enterTypes();
+            if (System.getProperty("diskbloom.bigold") != null) enterBigOld();
             String search = System.getProperty("diskbloom.search");
             if (search != null) runSearch(search);
             if (System.getProperty("diskbloom.assistant") != null) toggleAssistant();
@@ -679,8 +733,10 @@ public class App extends Application {
     }
 
     private void showCurrent() {
+        typesMode = false; typesBtn.setText("By type");
         Node cur = stack.peek();
         upBtn.setDisable(stack.size() <= 1);
+        applyView();
         updateSidebar(cur);
         if (cur == null) { list.getItems().clear(); render(); return; }
         crumb.setText(breadcrumb() + "      " + Sizes.human(cur.size));
@@ -711,6 +767,7 @@ public class App extends Application {
         browseRoot = n;
         biggestMode = false;
         biggestBtn.setText("Biggest files");
+        typesMode = false; typesBtn.setText("By type");
         selected = null;
         if (!listView) { listView = true; viewBtn.setText("Map view"); }
 
@@ -1410,6 +1467,7 @@ public class App extends Application {
         Node root = stack.peekLast();
         if (root == null) return;
         searchHits = null; searchLabel = ""; browseRoot = null;
+        typesMode = false; typesBtn.setText("By type");
         PriorityQueue<Node> heap = new PriorityQueue<>(Comparator.comparingLong((Node n) -> n.size));
         collectInto(root, heap); // keeps only the top BIGGEST_N files, bounded memory
         List<Node> files = new ArrayList<>(heap);
@@ -1465,10 +1523,12 @@ public class App extends Application {
         List<Node> hits = new ArrayList<>();
         searchCollect(root, pred, hits);
         hits.sort(Comparator.comparingLong((Node n) -> n.size).reversed());
-        if (hits.size() > SEARCH_CAP) hits = new ArrayList<>(hits.subList(0, SEARCH_CAP));
-        searchHits = hits;
-        searchLabel = q.trim();
-        showSearchResults();
+        boolean capped = hits.size() > SEARCH_CAP;
+        if (capped) hits = new ArrayList<>(hits.subList(0, SEARCH_CAP));
+        String label = "Search: \"" + q.trim() + "\"";
+        String st = hits.size() + " match(es) for \"" + q.trim() + "\"  ·  sorted by size"
+                + (capped ? "  ·  showing largest " + SEARCH_CAP : "") + "  ·  right-click for actions";
+        showFlat(hits, label, st);
     }
 
     private static void searchCollect(Node n, java.util.function.Predicate<Node> pred, List<Node> out) {
@@ -1499,31 +1559,153 @@ public class App extends Application {
         return d >= 0 ? n.name.substring(d + 1).toLowerCase() : "";
     }
 
-    private void showSearchResults() {
-        biggestMode = false;
-        biggestBtn.setText("Biggest files");
+    /** Show a flat list of files (search hits, big-&-old, etc.) in both the list and the treemap. */
+    private void showFlat(List<Node> files, String title, String statusMsg) {
+        searchHits = files;
+        searchLabel = title;
+        biggestMode = false; biggestBtn.setText("Biggest files");
+        typesMode = false; typesBtn.setText("By type");
+        browseRoot = null;
         selected = null;
+        if (!listView) { listView = true; viewBtn.setText("Map view"); }
 
         long sum = 0;
-        for (Node n : searchHits) sum += n.size;
+        for (Node n : files) sum += n.size;
         currentTotal = sum;
-        crumb.setText("Search: \"" + searchLabel + "\"   ·   " + searchHits.size() + " file(s)"
-                + (searchHits.size() >= SEARCH_CAP ? " (showing largest " + SEARCH_CAP + ")" : ""));
-        sTitle.setText("Search results");
+        crumb.setText(title + "   ·   " + files.size() + " file(s)");
+        sTitle.setText(title);
         sSize.setText(Sizes.human(sum));
-        sCount.setText(searchHits.size() + " files");
+        sCount.setText(files.size() + " files");
 
         dominant.clear();
-        for (Node n : searchHits) dominant.put(n, catOf(n));
-        list.getItems().setAll(searchHits);
+        for (Node n : files) dominant.put(n, catOf(n));
+        list.getItems().setAll(files);
         catSums.clear();
-        for (Node n : searchHits) catSums.merge(catOf(n), n.size, Long::sum);
+        for (Node n : files) catSums.merge(catOf(n), n.size, Long::sum);
         updateLegend();
 
         rebuildTree();
         showResults();
-        status.setText(searchHits.size() + " match(es) for \"" + searchLabel + "\"  ·  sorted by size  ·  right-click for actions");
+        status.setText(statusMsg);
         render();
+    }
+
+    // ---- big & old files (largest files, least-recently-modified first) --
+
+    private void enterBigOld() {
+        Node root = stack.peekLast();
+        if (root == null) { info("Scan a folder first to find big, old files."); return; }
+        PriorityQueue<Node> heap = new PriorityQueue<>(Comparator.comparingLong((Node n) -> n.size));
+        collectInto(root, heap);   // the top BIGGEST_N biggest files
+        List<Node> files = new ArrayList<>(heap);
+        files.sort(Comparator.comparingLong((Node n) -> mtime(n.path))
+                .thenComparing(Comparator.comparingLong((Node n) -> n.size).reversed()));
+        showFlat(files, "Big & old files", files.size() + " large files, least-recently-modified first  ·  right-click for actions");
+    }
+
+    private static long mtime(Path p) {
+        try { return Files.getLastModifiedTime(p).toMillis(); } catch (Exception e) { return Long.MAX_VALUE; }
+    }
+
+    // ---- file-type breakdown --------------------------------------------
+
+    private void enterTypes() {
+        Node root = stack.peekLast();
+        if (root == null) { info("Scan a folder first to see its file-type breakdown."); return; }
+        typesMode = true;
+        searchHits = null; searchLabel = "";
+        biggestMode = false; biggestBtn.setText("Biggest files");
+        selected = null;
+        typesBtn.setText("← Back");
+
+        // sidebar reflects the scanned root while the centre shows the breakdown
+        currentTotal = root.size;
+        updateSidebar(root);
+        List<Node> kids = new ArrayList<>();
+        if (root.children != null) for (Node n : root.children) if (n.size > 0) kids.add(n);
+        dominant.clear();
+        for (Node k : kids) dominant.put(k, dominantCat(k));
+        list.getItems().setAll(kids);
+        catSums.clear(); accumulate(root, catSums); updateLegend();
+
+        buildTypesPane(root);
+        showResults();     // applyView() now shows typesPane
+        crumb.setText("File types by size  ·  " + root.name);
+        status.setText("Which file types use the most space  ·  click a type to see those files");
+    }
+
+    private void exitTypes() {
+        typesMode = false;
+        typesBtn.setText("By type");
+        showCurrent();
+        if (listView) rebuildTree();
+    }
+
+    private void buildTypesPane(Node root) {
+        Map<String, long[]> agg = new HashMap<>();
+        aggExt(root, agg);                              // ext -> [totalSize, count]
+        List<Map.Entry<String, long[]>> es = new ArrayList<>(agg.entrySet());
+        es.sort((a, b) -> Long.compare(b.getValue()[0], a.getValue()[0]));
+        long total = 0;
+        for (var e : es) total += e.getValue()[0];
+        long max = es.isEmpty() ? 0 : es.get(0).getValue()[0];
+
+        VBox rows = new VBox(3);
+        rows.setPadding(new Insets(16));
+        Label h = new Label("File types by size");
+        h.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:19px; -fx-font-weight:bold;");
+        Label sub = new Label(Sizes.human(total) + " across " + es.size() + " file types  ·  click a row to filter to those files");
+        sub.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:12px; -fx-padding:0 0 8 0;");
+        rows.getChildren().addAll(h, sub);
+        int shown = 0;
+        for (var e : es) {
+            if (shown++ >= 40) break;
+            rows.getChildren().add(typeRow(e.getKey(), e.getValue()[0], (int) e.getValue()[1], total, max));
+        }
+        if (es.size() > 40) {
+            Label more = new Label("… and " + (es.size() - 40) + " smaller file types");
+            more.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px; -fx-padding:6 0 0 0;");
+            rows.getChildren().add(more);
+        }
+        typesPane.setContent(rows);
+        typesPane.setVvalue(0);
+    }
+
+    private HBox typeRow(String ext, long size, int count, long total, long max) {
+        Cat cat = EXT.getOrDefault(ext, Cat.OTHER);
+        Region sw = new Region();
+        sw.setMinSize(11, 11); sw.setPrefSize(11, 11); sw.setMaxSize(11, 11);
+        sw.setStyle("-fx-background-color:" + rgb(cat.color) + "; -fx-background-radius:2;");
+        Label name = new Label(ext.isEmpty() ? "(no extension)" : "." + ext);
+        name.setMinWidth(120); name.setPrefWidth(120);
+        name.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:13px; -fx-font-weight:bold;");
+        Region bar = new Region();
+        bar.setPrefWidth(Math.max(2, max > 0 ? 320.0 * size / max : 0));
+        bar.setMinWidth(Region.USE_PREF_SIZE);
+        bar.setPrefHeight(13);
+        bar.setStyle("-fx-background-color:" + rgb(cat.color) + "; -fx-background-radius:3;");
+        Label sz = new Label(Sizes.human(size));
+        sz.setMinWidth(80);
+        sz.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:12px;");
+        Label cnt = new Label(count + (count == 1 ? " file" : " files"));
+        cnt.setMinWidth(72);
+        cnt.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px;");
+        Label pct = new Label(String.format("%.1f%%", total > 0 ? 100.0 * size / total : 0));
+        pct.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px;");
+        HBox row = new HBox(10, sw, name, bar, sz, cnt, pct);
+        row.setAlignment(Pos.CENTER_LEFT);
+        row.setPadding(new Insets(4));
+        row.setStyle("-fx-cursor: hand;");
+        if (!ext.isEmpty()) row.setOnMouseClicked(e -> runSearch("." + ext));
+        return row;
+    }
+
+    private static void aggExt(Node n, Map<String, long[]> agg) {
+        if (!n.dir) {
+            if (n.size > 0) { long[] a = agg.computeIfAbsent(extOf(n), k -> new long[2]); a[0] += n.size; a[1]++; }
+            return;
+        }
+        if (n.children != null) for (Node c : n.children) aggExt(c, agg);
     }
 
     // Re-root the list/tree for the current mode (search, biggest, live browse, or scanned tree).
@@ -1540,12 +1722,12 @@ public class App extends Application {
         }
     }
 
-    /** Clear results and restore the previous view (browse folder or scanned tree). */
+    /** Clear results and restore the scanned tree. */
     private void clearSearch() {
         if (searchHits == null) return;
         searchHits = null; searchLabel = "";
-        if (browseRoot != null) { Path p = browseRoot.path; browseRoot = null; browseTo(p); }
-        else { showCurrent(); if (listView) buildTree(stack.peek()); }
+        showCurrent();
+        if (listView) buildTree(stack.peek());
     }
 
     /** Drop results without restoring a view (for callers that set their own view next). */
