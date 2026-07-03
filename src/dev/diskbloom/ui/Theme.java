@@ -110,6 +110,17 @@ public final class Theme {
         .dialog-pane .label { -fx-text-fill: #e6e6e6; }
         .dialog-pane .header-panel { -fx-background-color: #2a2a2c; }
         .dialog-pane .header-panel .label { -fx-text-fill: #e6e6e6; -fx-font-size: 14px; }
+
+        .tree-table-view { -fx-background-color: #1e1e1e; -fx-control-inner-background: #1e1e1e; -fx-border-color: transparent; -fx-table-cell-border-color: transparent; }
+        .tree-table-view .column-header-background { -fx-background-color: #2b2b2b; }
+        .tree-table-view .column-header, .tree-table-view .filler { -fx-background-color: #2b2b2b; }
+        .tree-table-view .column-header .label { -fx-text-fill: #b0b0b0; -fx-alignment: CENTER-LEFT; -fx-font-size: 11px; }
+        .tree-table-row-cell { -fx-background-color: transparent; -fx-border-color: transparent; }
+        .tree-table-row-cell:odd { -fx-background-color: #212122; }
+        .tree-table-row-cell:selected { -fx-background-color: #34343a; }
+        .tree-table-cell { -fx-text-fill: #e6e6e6; -fx-border-color: transparent; -fx-padding: 2 6 2 6; -fx-font-size: 12px; }
+        .tree-table-row-cell:selected .tree-table-cell { -fx-text-fill: white; }
+        .tree-table-view .arrow, .tree-table-view .tree-disclosure-node .arrow { -fx-background-color: #a0a0a0; }
         """;
 
     private Theme() {}

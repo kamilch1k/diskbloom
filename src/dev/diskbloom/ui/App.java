@@ -8,6 +8,8 @@ import dev.diskbloom.llm.Ollama;
 
 import javafx.application.Application;
 import javafx.application.Platform;
+import javafx.beans.property.ReadOnlyObjectWrapper;
+import javafx.beans.property.ReadOnlyStringWrapper;
 import javafx.concurrent.Task;
 import javafx.embed.swing.SwingFXUtils;
 import javafx.geometry.Insets;
@@ -31,6 +33,10 @@ import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
+import javafx.scene.control.TreeItem;
+import javafx.scene.control.TreeTableCell;
+import javafx.scene.control.TreeTableColumn;
+import javafx.scene.control.TreeTableView;
 import javafx.scene.image.WritableImage;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
@@ -126,6 +132,9 @@ public class App extends Application {
     private final Button biggestBtn = new Button("Biggest files");
     private boolean biggestMode;
     private List<Node> biggestFiles;
+    private final TreeTableView<Node> tree = new TreeTableView<>();
+    private boolean listView = true;
+    private final Button viewBtn = new Button("Map view");
 
     private BorderPane rootPane;
     private final Button assistantBtn = new Button("Assistant");
@@ -203,6 +212,7 @@ public class App extends Application {
         biggestBtn.setText("Biggest files");
         showResults();
         showCurrent();
+        buildTree(cached.root());
         String when = new java.text.SimpleDateFormat("MMM d, HH:mm").format(new java.util.Date(cached.timestamp()));
         status.setText("Showing cached scan from " + when + "  ·  click Rescan to refresh");
     }
@@ -220,9 +230,10 @@ public class App extends Application {
         HBox.setHgrow(crumb, Priority.ALWAYS);
 
         biggestBtn.setOnAction(e -> { if (biggestMode) exitBiggest(); else enterBiggest(); });
+        viewBtn.setOnAction(e -> toggleView());
         assistantBtn.setDisable(true);
         assistantBtn.setOnAction(e -> toggleAssistant());
-        HBox bar = new HBox(10, open, rescanBtn, upBtn, biggestBtn, crumb, assistantBtn);
+        HBox bar = new HBox(10, open, rescanBtn, upBtn, biggestBtn, viewBtn, crumb, assistantBtn);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(8, 12, 8, 12));
         bar.setStyle("-fx-background-color:#2b2b2b; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
@@ -302,10 +313,12 @@ public class App extends Application {
             }
         });
 
+        configureTree();
         startPane = buildStartPane();
         scanPane = buildScanPane();
         scanPane.setVisible(false);
-        return new StackPane(holder, startPane, scanPane);
+        applyView();
+        return new StackPane(holder, tree, startPane, scanPane);
     }
 
     private VBox buildStartPane() {
@@ -363,7 +376,68 @@ public class App extends Application {
 
     private void showStart() { startPane.setVisible(true); scanPane.setVisible(false); }
     private void showScanning() { scanPane.setVisible(true); startPane.setVisible(false); }
-    private void showResults() { startPane.setVisible(false); scanPane.setVisible(false); }
+    private void showResults() { startPane.setVisible(false); scanPane.setVisible(false); applyView(); }
+
+    private void applyView() {
+        holder.setVisible(!listView);
+        tree.setVisible(listView);
+    }
+
+    private void toggleView() {
+        listView = !listView;
+        viewBtn.setText(listView ? "Map view" : "List view");
+        applyView();
+        if (listView) buildTree(stack.peekLast());
+        else render();
+    }
+
+    private void configureTree() {
+        tree.setShowRoot(true);
+        tree.setColumnResizePolicy(TreeTableView.CONSTRAINED_RESIZE_POLICY);
+        TreeTableColumn<Node, String> nameCol = new TreeTableColumn<>("Name");
+        nameCol.setCellValueFactory(p -> new ReadOnlyStringWrapper(p.getValue().getValue().name + (p.getValue().getValue().dir ? "\\" : "")));
+        nameCol.setPrefWidth(380);
+        TreeTableColumn<Node, Node> barCol = new TreeTableColumn<>("Share of folder");
+        barCol.setCellValueFactory(p -> new ReadOnlyObjectWrapper<>(p.getValue().getValue()));
+        barCol.setCellFactory(c -> new BarCell());
+        barCol.setPrefWidth(200);
+        barCol.setSortable(false);
+        TreeTableColumn<Node, String> sizeCol = new TreeTableColumn<>("Size");
+        sizeCol.setCellValueFactory(p -> new ReadOnlyStringWrapper(Sizes.human(p.getValue().getValue().size)));
+        sizeCol.setPrefWidth(90);
+        sizeCol.setStyle("-fx-alignment: CENTER-RIGHT;");
+        tree.getColumns().add(nameCol);
+        tree.getColumns().add(barCol);
+        tree.getColumns().add(sizeCol);
+        tree.getSelectionModel().selectedItemProperty().addListener((o, ov, nv) -> { if (nv != null) updateStatus(nv.getValue()); });
+        tree.setOnContextMenuRequested(e -> {
+            TreeItem<Node> it = tree.getSelectionModel().getSelectedItem();
+            if (it != null) menuFor(it.getValue()).show(tree, e.getScreenX(), e.getScreenY());
+        });
+    }
+
+    private void buildTree(Node root) {
+        if (root == null) { tree.setRoot(null); return; }
+        TreeItem<Node> r = lazyItem(root);
+        r.setExpanded(true);
+        tree.setRoot(r);
+    }
+
+    private static TreeItem<Node> lazyItem(Node n) {
+        TreeItem<Node> item = new TreeItem<>(n) {
+            @Override public boolean isLeaf() { return !(n.dir && n.children != null && !n.children.isEmpty()); }
+        };
+        if (n.dir && n.children != null && !n.children.isEmpty()) {
+            item.expandedProperty().addListener((obs, was, is) -> {
+                if (is && item.getChildren().isEmpty()) {
+                    List<Node> kids = new ArrayList<>(n.children);
+                    kids.sort(Comparator.comparingLong((Node c) -> c.size).reversed());
+                    for (Node c : kids) item.getChildren().add(lazyItem(c));
+                }
+            });
+        }
+        return item;
+    }
 
     // ---- scanning + navigation ------------------------------------------
 
@@ -405,6 +479,7 @@ public class App extends Application {
             biggestBtn.setText("Biggest files");
             showResults();
             showCurrent();
+            buildTree(result);
             boolean usable = result.dir && result.children != null && !result.children.isEmpty();
             if (!usable) status.setText("Nothing to show for " + root + " — is that path valid and accessible?");
             final Node toCache = result;
@@ -1106,6 +1181,30 @@ public class App extends Application {
             System.err.println("snapshot failed: " + ex);
         } finally {
             Platform.exit();
+        }
+    }
+
+    // Bar in the list view: a proportional colored bar (share of the parent folder).
+    private final class BarCell extends TreeTableCell<Node, Node> {
+        private final Region fill = new Region();
+        private final HBox box = new HBox(fill);
+        BarCell() {
+            box.setAlignment(Pos.CENTER_LEFT);
+            fill.setMinHeight(11); fill.setPrefHeight(11); fill.setMaxHeight(11);
+        }
+        @Override protected void updateItem(Node n, boolean empty) {
+            super.updateItem(n, empty);
+            fill.prefWidthProperty().unbind();
+            if (empty || n == null) { setGraphic(null); return; }
+            TreeItem<Node> row = getTableRow() != null ? getTableRow().getTreeItem() : null;
+            double frac = 1;
+            if (row != null && row.getParent() != null) {
+                long ps = row.getParent().getValue().size;
+                frac = ps > 0 ? Math.max(0.015, Math.min(1.0, (double) n.size / ps)) : 0;
+            }
+            fill.setStyle("-fx-background-color:" + rgb(colorOf(n)) + "; -fx-background-radius:3;");
+            fill.prefWidthProperty().bind(widthProperty().subtract(12).multiply(frac));
+            setGraphic(box);
         }
     }
 
