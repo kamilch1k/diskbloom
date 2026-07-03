@@ -159,7 +159,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.10.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.11.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export CSV");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private boolean typesMode;                         // showing the file-type breakdown pane
@@ -213,6 +213,8 @@ public class App extends Application {
         assert parseQuery("app").test(javaFile) : "name substring";
         assert parseQuery("type:code").test(javaFile) : "type match";
         assert !parseQuery(".mp4").test(javaFile) : "ext non-match";
+        Node noExt = Scanner.shallow(Paths.get("C:\\x\\LICENSE"));   // the "(no extension)" bucket
+        assert extOf(noExt).isEmpty() && !extOf(javaFile).isEmpty() : "no-extension detection";
 
         // duplicate detection: two identical files + one different -> exactly one pair
         Path d = Files.createTempDirectory("dbdup");
@@ -1662,6 +1664,22 @@ public class App extends Application {
         return d >= 0 ? n.name.substring(d + 1).toLowerCase() : "";
     }
 
+    /** Filter the scanned tree to files of one extension ("" = no extension) and show them flat. */
+    private void filterByExt(String ext) {
+        Node root = stack.peekLast();
+        if (root == null) return;
+        List<Node> hits = new ArrayList<>();
+        searchCollect(root, n -> !n.dir && extOf(n).equals(ext), hits);
+        hits.sort(Comparator.comparingLong((Node n) -> n.size).reversed());
+        boolean capped = hits.size() > SEARCH_CAP;
+        if (capped) hits = new ArrayList<>(hits.subList(0, SEARCH_CAP));
+        String what = ext.isEmpty() ? "no extension" : "." + ext;
+        String label = ext.isEmpty() ? "Files with no extension" : "Type: ." + ext;
+        String st = hits.size() + " file(s) with " + what
+                + (capped ? "  ·  showing largest " + SEARCH_CAP : "") + "  ·  right-click for actions";
+        showFlat(hits, label, st);
+    }
+
     /** Show a flat list of files (search hits, big-&-old, etc.) in both the list and the treemap. */
     private void showFlat(List<Node> files, String title, String statusMsg) {
         searchHits = files;
@@ -1791,7 +1809,10 @@ public class App extends Application {
         row.setAlignment(Pos.CENTER_LEFT);
         row.setPadding(new Insets(4));
         row.setStyle("-fx-cursor: hand;");
-        if (!ext.isEmpty()) row.setOnMouseClicked(e -> runSearch("." + ext));
+        row.setOnMouseClicked(e -> filterByExt(ext));
+        Tooltip.install(row, new Tooltip(ext.isEmpty()
+                ? "Files whose name has no .extension — e.g. LICENSE, README, or git object files. Click to list them."
+                : "Click to list all ." + ext + " files"));
         return row;
     }
 
