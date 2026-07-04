@@ -150,6 +150,7 @@ public class App extends Application {
     private final ComboBox<String> driveBox = new ComboBox<>();
     private final TextField addressField = new TextField();
     private final TextField searchField = new TextField();
+    private final Button measureBtn = new Button("Measure folders");
     private Node browseRoot;          // non-null while the list is live-browsing the filesystem
     private List<Node> searchHits;    // non-null while showing search results
     private String searchLabel = "";
@@ -159,7 +160,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.13.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.14.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export CSV");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private boolean typesMode;                         // showing the file-type breakdown pane
@@ -506,6 +507,8 @@ public class App extends Application {
         addressField.setOnAction(e -> go(addressField.getText()));
         Button goBtn = new Button("Go");
         goBtn.setOnAction(e -> go(addressField.getText()));
+        measureBtn.setTooltip(new Tooltip("Compute the size of every folder in this listing (browse mode)"));
+        measureBtn.setOnAction(e -> measureVisible());
 
         searchField.setPromptText("Search  ·  name, .mp4, or type:video");
         searchField.setPrefWidth(240);
@@ -514,7 +517,7 @@ public class App extends Application {
         clearBtn.setTooltip(new Tooltip("Clear search"));
         clearBtn.setOnAction(e -> { searchField.clear(); clearSearch(); });
 
-        HBox bar = new HBox(8, driveBox, addressField, goBtn, searchField, clearBtn);
+        HBox bar = new HBox(8, driveBox, addressField, goBtn, measureBtn, searchField, clearBtn);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(6, 12, 6, 12));
         bar.setStyle("-fx-background-color:#262626; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
@@ -2130,6 +2133,36 @@ public class App extends Application {
             return new ContextMenu(open, reveal, scanItem, new SeparatorMenuItem(), del);
         }
         return new ContextMenu(open, reveal, new SeparatorMenuItem(), del);
+    }
+
+    // Measure every unmeasured folder in the current browse listing, one after another, showing progress.
+    private void measureVisible() {
+        if (browseRoot == null || browseRoot.children == null) {
+            status.setText("\"Measure folders\" works while browsing — after a scan, folders already have sizes.");
+            return;
+        }
+        List<Node> folders = new ArrayList<>();
+        for (Node c : browseRoot.children) if (c.dir && c.size == 0) folders.add(c);
+        if (folders.isEmpty()) { status.setText("No unmeasured folders in " + browseRoot.name + "."); return; }
+        measureBtn.setDisable(true);
+        Thread t = new Thread(() -> {
+            for (int i = 0; i < folders.size(); i++) {
+                Node f = folders.get(i);
+                long size = Scanner.sizeOf(f.path);
+                final int done = i + 1;
+                Platform.runLater(() -> {
+                    f.size = size;
+                    tree.refresh(); list.refresh();
+                    status.setText("Measuring folders…  " + done + "/" + folders.size());
+                });
+            }
+            Platform.runLater(() -> {
+                measureBtn.setDisable(false);
+                status.setText("Measured " + folders.size() + " folder(s) in " + browseRoot.name);
+            });
+        }, "diskbloom-measure-all");
+        t.setDaemon(true);
+        t.start();
     }
 
     // Compute one folder's size on demand (off-thread) and show it in place — Explorer never does this.
