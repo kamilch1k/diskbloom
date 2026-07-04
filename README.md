@@ -41,7 +41,7 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 - [x] Keyboard shortcuts — Ctrl+O open, F5 rescan, Ctrl+F search, Ctrl+E export, Alt+← up a level, Esc to drop a search or leave an analysis view
 - [x] Start screen with an all-drives overview — each drive's used/total bar and free space, with a "cached" badge on drives that open instantly
 - [x] Single-instance (only one window at a time) and the version shown in the title bar and sidebar
-- [x] Export the scan to CSV (Path, Bytes, Size, Type — one row per file and folder) for a spreadsheet, or to nested JSON (`{name, path, bytes, dir, children}`) for scripting — pick the format by file extension in the save dialog
+- [x] Export the scan to CSV (Path, Bytes, Size, Type — one row per file and folder) for a spreadsheet, or to nested JSON (`{name, path, bytes, dir, children}`) for scripting — pick the format by file extension in the save dialog; right-click any scanned folder to export just its subtree
 - [ ] Raw NTFS MFT reading via Win32 FFI for WizTree-class scan speed
 - [ ] Hardlink / junction-aware accuracy
 - [ ] Packaged installer (jpackage)

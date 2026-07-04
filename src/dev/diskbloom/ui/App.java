@@ -165,7 +165,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.24.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.25.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private final MenuButton recentMenu = new MenuButton("Recent"); // recently-scanned roots, reopen from cache
@@ -269,6 +269,16 @@ public class App extends Application {
         assert js.contains("\"name\":\"a.txt\"") : "json child node";
         Files.delete(c.resolve("a.txt"));
         Files.delete(c);
+
+        // export-subtree: exporting a child node yields only that subtree, not its siblings
+        Path et = Files.createTempDirectory("dbexp");
+        Files.createDirectory(et.resolve("sub"));
+        Files.writeString(et.resolve("sub").resolve("x.txt"), "xx");
+        Files.writeString(et.resolve("top.txt"), "top");
+        Node subNode = null;
+        for (Node ch : Scanner.scan(et).children) if (ch.name.equals("sub")) subNode = ch;
+        assert subNode != null && toCsv(subNode).contains("x.txt") && !toCsv(subNode).contains("top.txt") : "subtree export excludes siblings";
+        Files.walk(et).sorted(Comparator.reverseOrder()).forEach(p -> { try { Files.delete(p); } catch (Exception ignore) { } });
 
         // per-root cache: a saved scan loads back for the same root, not for another
         assert hashName(Paths.get("C:\\Users")).equals(hashName(Paths.get("c:\\users"))) : "cache key case-stable";
@@ -384,7 +394,7 @@ public class App extends Application {
         acc.put(new KeyCodeCombination(KeyCode.O, KeyCombination.CONTROL_DOWN), () -> chooseAndScan(stage));   // open folder
         acc.put(new KeyCodeCombination(KeyCode.F5), () -> { Node r = stack.peekLast(); scan(r != null ? r.path : systemRoot()); }); // rescan
         acc.put(new KeyCodeCombination(KeyCode.F, KeyCombination.CONTROL_DOWN), searchField::requestFocus);    // focus search
-        acc.put(new KeyCodeCombination(KeyCode.E, KeyCombination.CONTROL_DOWN), () -> chooseAndExport(stage)); // export
+        acc.put(new KeyCodeCombination(KeyCode.E, KeyCombination.CONTROL_DOWN), this::chooseAndExport); // export
         acc.put(new KeyCodeCombination(KeyCode.LEFT, KeyCombination.ALT_DOWN), this::goUp);                    // up a level
         acc.put(new KeyCodeCombination(KeyCode.ESCAPE), this::onEscape);                                       // clear search / leave view
     }
@@ -670,7 +680,7 @@ public class App extends Application {
         viewsMenu.getItems().setAll(miBiggest, miBigOld, miTypes, new SeparatorMenuItem(), miFolders);
         recentMenu.setOnShowing(e -> populateRecent());
         dupBtn.setOnAction(e -> findDuplicates());
-        exportBtn.setOnAction(e -> chooseAndExport(stage));
+        exportBtn.setOnAction(e -> chooseAndExport());
         viewBtn.setOnAction(e -> toggleView());
         assistantBtn.setDisable(true);
         assistantBtn.setOnAction(e -> toggleAssistant());
@@ -2356,16 +2366,21 @@ public class App extends Application {
 
     // ---- CSV export -----------------------------------------------------
 
-    private void chooseAndExport(Stage stage) {
+    private void chooseAndExport() {
         Node root = stack.peekLast();
         if (root == null) { info("Scan a folder first, then export it."); return; }
+        exportNode(root);
+    }
+
+    /** Save one node's subtree (the whole scan, or a right-clicked folder) as CSV or JSON. */
+    private void exportNode(Node root) {
         FileChooser fc = new FileChooser();
-        fc.setTitle("Export scan (CSV or JSON)");
+        fc.setTitle("Export " + root.name + " (CSV or JSON)");
         fc.getExtensionFilters().addAll(
                 new FileChooser.ExtensionFilter("CSV file", "*.csv"),
                 new FileChooser.ExtensionFilter("JSON file", "*.json"));
         fc.setInitialFileName("diskbloom-" + safeName(root.name) + ".csv");
-        File f = fc.showSaveDialog(stage);
+        File f = fc.showSaveDialog(scene.getWindow());
         if (f == null) return;
         boolean json = f.getName().toLowerCase().endsWith(".json");
         try {
@@ -2477,6 +2492,11 @@ public class App extends Application {
                 MenuItem measure = new MenuItem("Measure size");
                 measure.setOnAction(a -> measureSize(n));
                 return new ContextMenu(open, reveal, measure, scanItem, new SeparatorMenuItem(), del);
+            }
+            if (browseRoot == null && n.children != null && !n.children.isEmpty()) {   // scanned subtree -> exportable
+                MenuItem exportItem = new MenuItem("Export this folder…");
+                exportItem.setOnAction(a -> exportNode(n));
+                return new ContextMenu(open, reveal, scanItem, exportItem, new SeparatorMenuItem(), del);
             }
             return new ContextMenu(open, reveal, scanItem, new SeparatorMenuItem(), del);
         }
