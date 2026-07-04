@@ -41,6 +41,9 @@ import javafx.scene.control.TreeTableCell;
 import javafx.scene.control.TreeTableColumn;
 import javafx.scene.control.TreeTableView;
 import javafx.scene.image.WritableImage;
+import javafx.scene.input.KeyCode;
+import javafx.scene.input.KeyCodeCombination;
+import javafx.scene.input.KeyCombination;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.Pane;
@@ -160,7 +163,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.16.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.17.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private final MenuButton recentMenu = new MenuButton("Recent"); // recently-scanned roots, reopen from cache
@@ -320,7 +323,9 @@ public class App extends Application {
         assistantPanel = buildAssistantPanel();
         initAssistant();
         loadSettings();
+        registerShortcuts(stage);
 
+        if (System.getProperty("diskbloom.accels") != null) { printAccels(); return; }
         if (System.getProperty("diskbloom.recent") != null) { runRecent(); return; }
         String browse = System.getProperty("diskbloom.browse");
         if (browse != null) { browseTo(Paths.get(browse)); if (shotPath != null) Platform.runLater(this::exportAndExit); return; }
@@ -352,6 +357,31 @@ public class App extends Application {
         Path home = Paths.get(System.getProperty("user.home"));
         Path root = home.getRoot();
         return root != null ? root : home;
+    }
+
+    // ---- keyboard shortcuts ---------------------------------------------
+
+    private void registerShortcuts(Stage stage) {
+        var acc = scene.getAccelerators();
+        acc.put(new KeyCodeCombination(KeyCode.O, KeyCombination.CONTROL_DOWN), () -> chooseAndScan(stage));   // open folder
+        acc.put(new KeyCodeCombination(KeyCode.F5), () -> { Node r = stack.peekLast(); scan(r != null ? r.path : systemRoot()); }); // rescan
+        acc.put(new KeyCodeCombination(KeyCode.F, KeyCombination.CONTROL_DOWN), searchField::requestFocus);    // focus search
+        acc.put(new KeyCodeCombination(KeyCode.E, KeyCombination.CONTROL_DOWN), () -> chooseAndExport(stage)); // export
+        acc.put(new KeyCodeCombination(KeyCode.LEFT, KeyCombination.ALT_DOWN), this::goUp);                    // up a level
+        acc.put(new KeyCodeCombination(KeyCode.ESCAPE), this::onEscape);                                       // clear search / leave view
+    }
+
+    // Escape: drop a search first, otherwise leave any analysis view back to folders.
+    private void onEscape() {
+        if (searchHits != null || !searchField.getText().isEmpty()) { searchField.clear(); clearSearch(); }
+        else if (biggestMode || typesMode) showFolders();
+    }
+
+    // Headless hook: -Ddiskbloom.accels prints the registered shortcuts and exits.
+    private void printAccels() {
+        System.out.println("=== SHORTCUTS ===");
+        for (KeyCombination k : scene.getAccelerators().keySet()) System.out.println(k.getDisplayText());
+        Platform.exit();
     }
 
     private static Path diskbloomDir() {
@@ -473,7 +503,7 @@ public class App extends Application {
     /** True in the PNG-shot and headless test hooks — those skip the single-instance lock. */
     private boolean headlessMode() {
         if (shotPath != null) return true;
-        for (String k : new String[]{"selftest", "ask", "analyze", "dupes", "junk", "exportcsv", "recent"})
+        for (String k : new String[]{"selftest", "ask", "analyze", "dupes", "junk", "exportcsv", "recent", "accels"})
             if (System.getProperty("diskbloom." + k) != null) return true;
         return false;
     }
@@ -535,8 +565,11 @@ public class App extends Application {
     private HBox buildToolbar(Stage stage) {
         Button open = new Button("Open folder…");
         open.setOnAction(e -> chooseAndScan(stage));
+        open.setTooltip(new Tooltip("Open a folder to scan  (Ctrl+O)"));
         Button rescanBtn = new Button("Rescan");
         rescanBtn.setOnAction(e -> { Node r = stack.peekLast(); scan(r != null ? r.path : systemRoot()); });
+        rescanBtn.setTooltip(new Tooltip("Rescan the current folder  (F5)"));
+        exportBtn.setTooltip(new Tooltip("Export the scan to CSV or JSON  (Ctrl+E)"));
         upBtn.setOnAction(e -> goUp());
         upBtn.setDisable(true);
         crumb.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:13px;");
