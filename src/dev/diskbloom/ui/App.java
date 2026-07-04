@@ -160,8 +160,8 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.14.0";           // shown in the title bar + sidebar; bump per release
-    private final Button exportBtn = new Button("Export CSV");
+    static final String VERSION = "0.15.0";           // shown in the title bar + sidebar; bump per release
+    private final Button exportBtn = new Button("Export");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private boolean typesMode;                         // showing the file-type breakdown pane
     private ScrollPane typesPane;
@@ -251,6 +251,10 @@ public class App extends Application {
         String csv = toCsv(Scanner.scan(c));
         assert csv.startsWith("Path,Bytes,Size,Type") : "csv header";
         assert csv.contains("a.txt") && csv.contains(",2,") : "csv file row with byte count";
+        String js = toJson(Scanner.scan(c));
+        assert jsonEsc("a\"b\\c").equals("a\\\"b\\\\c") : "json escaping";
+        assert js.contains("\"bytes\":2") && js.contains("\"dir\":true") && js.contains("\"children\":[") : "json shape";
+        assert js.contains("\"name\":\"a.txt\"") : "json child node";
         Files.delete(c.resolve("a.txt"));
         Files.delete(c);
 
@@ -2056,16 +2060,19 @@ public class App extends Application {
 
     private void chooseAndExport(Stage stage) {
         Node root = stack.peekLast();
-        if (root == null) { info("Scan a folder first, then export it to CSV."); return; }
+        if (root == null) { info("Scan a folder first, then export it."); return; }
         FileChooser fc = new FileChooser();
-        fc.setTitle("Export scan as CSV");
-        fc.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV file", "*.csv"));
+        fc.setTitle("Export scan (CSV or JSON)");
+        fc.getExtensionFilters().addAll(
+                new FileChooser.ExtensionFilter("CSV file", "*.csv"),
+                new FileChooser.ExtensionFilter("JSON file", "*.json"));
         fc.setInitialFileName("diskbloom-" + safeName(root.name) + ".csv");
         File f = fc.showSaveDialog(stage);
         if (f == null) return;
+        boolean json = f.getName().toLowerCase().endsWith(".json");
         try {
-            Files.writeString(f.toPath(), toCsv(root));
-            status.setText("Exported " + rowCount(root) + " rows (" + Sizes.human(root.size) + ") to " + f);
+            Files.writeString(f.toPath(), json ? toJson(root) : toCsv(root));
+            status.setText("Exported " + rowCount(root) + (json ? " nodes (JSON) to " : " rows (CSV) to ") + f);
         } catch (Exception e) {
             info("Export failed: " + e.getMessage());
         }
@@ -2103,11 +2110,54 @@ public class App extends Application {
         return c;
     }
 
-    // Headless hook: -Ddiskbloom.exportcsv=<path> writes the CSV and exits.
+    /** The scan as a nested JSON tree: {name, path, bytes, dir, children:[…]}. */
+    private static String toJson(Node root) {
+        StringBuilder sb = new StringBuilder();
+        jsonNode(root, sb);
+        return sb.append('\n').toString();
+    }
+
+    private static void jsonNode(Node n, StringBuilder sb) {
+        sb.append("{\"name\":\"").append(jsonEsc(n.name))
+          .append("\",\"path\":\"").append(jsonEsc(n.path.toString()))
+          .append("\",\"bytes\":").append(n.size)
+          .append(",\"dir\":").append(n.dir);
+        if (n.dir && n.children != null && !n.children.isEmpty()) {
+            sb.append(",\"children\":[");
+            for (int i = 0; i < n.children.size(); i++) {
+                if (i > 0) sb.append(',');
+                jsonNode(n.children.get(i), sb);
+            }
+            sb.append(']');
+        }
+        sb.append('}');
+    }
+
+    private static String jsonEsc(String s) {
+        StringBuilder b = new StringBuilder(s.length() + 8);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"' -> b.append("\\\"");
+                case '\\' -> b.append("\\\\");
+                case '\n' -> b.append("\\n");
+                case '\r' -> b.append("\\r");
+                case '\t' -> b.append("\\t");
+                default -> { if (c < 0x20) b.append(String.format("\\u%04x", (int) c)); else b.append(c); }
+            }
+        }
+        return b.toString();
+    }
+
+    // Headless hook: -Ddiskbloom.exportcsv=<path> writes CSV or JSON (by the path's extension) and exits.
     private void runExport(String out) {
         Node root = stack.peekLast();
         try {
-            if (root != null) { Files.writeString(Paths.get(out), toCsv(root)); System.out.println("exported " + rowCount(root) + " rows to " + out); }
+            if (root != null) {
+                boolean json = out.toLowerCase().endsWith(".json");
+                Files.writeString(Paths.get(out), json ? toJson(root) : toCsv(root));
+                System.out.println("exported " + rowCount(root) + (json ? " nodes (JSON) to " : " rows (CSV) to ") + out);
+            }
         } catch (Exception e) { System.out.println("export failed: " + e); }
         Platform.exit();
     }

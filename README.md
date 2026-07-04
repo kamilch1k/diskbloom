@@ -37,7 +37,7 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 - [x] Modern flat dark theme, and a per-root scan cache — every drive/folder you've scanned is remembered and reopens instantly (drive buttons and Open folder reuse the cache; Rescan to refresh)
 - [x] Start screen with an all-drives overview — each drive's used/total bar and free space, with a "cached" badge on drives that open instantly
 - [x] Single-instance (only one window at a time) and the version shown in the title bar and sidebar
-- [x] Export the scan to CSV (Path, Bytes, Size, Type — one row per file and folder) for opening in a spreadsheet
+- [x] Export the scan to CSV (Path, Bytes, Size, Type — one row per file and folder) for a spreadsheet, or to nested JSON (`{name, path, bytes, dir, children}`) for scripting — pick the format by file extension in the save dialog
 - [ ] Raw NTFS MFT reading via Win32 FFI for WizTree-class scan speed
 - [ ] Hardlink / junction-aware accuracy
 - [ ] Packaged installer (jpackage)
