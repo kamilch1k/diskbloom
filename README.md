@@ -24,7 +24,7 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 
 - [x] Scan engine — zero-dependency recursive walk, size aggregation, largest-first (with a self-check)
 - [x] Desktop UI — nested, type-coloured squarified treemap with drill-down; sidebar with folder summary, drive usage, a by-type legend, and a largest-items list
-- [x] Two center views — the treemap or a WinDirStat-style bar list (name · proportional bar · size); toggle in the toolbar
+- [x] Two center views — the treemap or a WinDirStat-style bar list (name · proportional bar · size); toggle in the toolbar. The treemap is navigable: scroll to zoom, drag to pan, double-click a folder to drill in (or empty space to reset)
 - [x] Optional auto-scan on launch (off by default — opens to a start screen or your last cached scan; toggle in Settings) with a live progress overlay (files/bytes/current folder + cancel)
 - [x] Right-click actions — open, reveal in Explorer, delete to Recycle Bin (recoverable, with confirm)
 - [x] Analysis views (under the "Views" menu) — biggest files, "big & old" (largest files, least-recently-modified first), and a file-type breakdown (which extensions use the most space; click one to filter to those files)

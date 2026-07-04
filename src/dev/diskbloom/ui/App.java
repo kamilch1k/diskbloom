@@ -163,7 +163,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.19.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.20.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private final MenuButton recentMenu = new MenuButton("Recent"); // recently-scanned roots, reopen from cache
@@ -193,6 +193,9 @@ public class App extends Application {
     private final EnumMap<Cat, Long> catSums = new EnumMap<>(Cat.class);
     private Node selected;
     private long currentTotal;
+
+    private double zoom = 1, panX = 0, panY = 0;              // Map-view pan/zoom transform
+    private double dragAnchorX, dragAnchorY, dragPanX, dragPanY;
 
     private final String shotPath = System.getProperty("diskbloom.shot");
     private Scene scene;
@@ -722,27 +725,47 @@ public class App extends Application {
         canvas.widthProperty().addListener(o -> render());
         canvas.heightProperty().addListener(o -> render());
         canvas.setOnMouseClicked(e -> {
+            double wx = toWorldX(e.getX()), wy = toWorldY(e.getY());
             if (e.getClickCount() == 2) {
-                Node d = dirAt(e.getX(), e.getY());
+                Node d = dirAt(wx, wy);
                 if (d != null) drill(d);
+                else { zoom = 1; panX = 0; panY = 0; draw(); }   // double-click empty space -> reset zoom
             } else {
-                Tile t = tileAt(e.getX(), e.getY());
+                Tile t = tileAt(wx, wy);
                 if (t == null) return;
                 if (list.getItems().contains(t.node())) list.getSelectionModel().select(t.node());
                 else { selected = t.node(); updateStatus(t.node()); draw(); }
             }
         });
         canvas.setOnMouseMoved(e -> {
-            Tile t = tileAt(e.getX(), e.getY());
+            Tile t = tileAt(toWorldX(e.getX()), toWorldY(e.getY()));
             if (t != null) updateStatus(t.node());
         });
         canvas.setOnContextMenuRequested(e -> {
-            Tile t = tileAt(e.getX(), e.getY());
+            Tile t = tileAt(toWorldX(e.getX()), toWorldY(e.getY()));
             if (t != null) {
                 selected = t.node();
                 draw();
                 menuFor(t.node()).show(canvas, e.getScreenX(), e.getScreenY());
             }
+        });
+        canvas.setOnScroll(e -> {
+            double nz = clamp(zoom * (e.getDeltaY() > 0 ? 1.15 : 1 / 1.15), 1.0, 24.0);
+            if (nz == zoom) return;
+            double wx = toWorldX(e.getX()), wy = toWorldY(e.getY());
+            zoom = nz;
+            panX = e.getX() - wx * zoom;   // keep the point under the cursor fixed while zooming
+            panY = e.getY() - wy * zoom;
+            clampPan();
+            draw();
+        });
+        canvas.setOnMousePressed(e -> { dragAnchorX = e.getX(); dragAnchorY = e.getY(); dragPanX = panX; dragPanY = panY; });
+        canvas.setOnMouseDragged(e -> {
+            if (zoom <= 1.0) return;
+            panX = dragPanX + (e.getX() - dragAnchorX);
+            panY = dragPanY + (e.getY() - dragAnchorY);
+            clampPan();
+            draw();
         });
 
         configureTree();
@@ -856,7 +879,10 @@ public class App extends Application {
         viewBtn.setText(listView ? "Map view" : "List view");
         applyView();
         if (listView) rebuildTree();
-        else render();
+        else {
+            render();
+            status.setText("Map view  ·  scroll to zoom, drag to pan, double-click a folder to open (empty space resets)");
+        }
     }
 
     private void configureTree() {
@@ -978,6 +1004,16 @@ public class App extends Application {
             if (System.getProperty("diskbloom.types") != null) enterTypes();
             if (System.getProperty("diskbloom.bigold") != null) enterBigOld();
             if (System.getProperty("diskbloom.junkui") != null) findJunk();
+            if (System.getProperty("diskbloom.map") != null) Platform.runLater(() -> {
+                listView = false; viewBtn.setText("List view"); applyView(); render();
+                String z = System.getProperty("diskbloom.zoom");
+                if (z != null) {
+                    zoom = Double.parseDouble(z);
+                    panX = canvas.getWidth() * (1 - zoom) / 2;    // centre the zoom
+                    panY = canvas.getHeight() * (1 - zoom) / 2;
+                    clampPan(); draw();
+                }
+            });
             String search = System.getProperty("diskbloom.search");
             if (search != null) runSearch(search);
             if (System.getProperty("diskbloom.assistant") != null) toggleAssistant();
@@ -1085,6 +1121,7 @@ public class App extends Application {
     // ---- rendering -------------------------------------------------------
 
     private void render() {
+        zoom = 1; panX = 0; panY = 0;   // a fresh layout resets the pan/zoom
         tiles.clear();
         topTiles.clear();
         double W = canvas.getWidth(), H = canvas.getHeight();
@@ -1148,11 +1185,28 @@ public class App extends Application {
         GraphicsContext g = canvas.getGraphicsContext2D();
         g.setFill(Color.web(BG));
         g.fillRect(0, 0, canvas.getWidth(), canvas.getHeight());
+        g.save();
+        g.translate(panX, panY);   // Map-view pan/zoom
+        g.scale(zoom, zoom);
         for (Tile t : tiles) {
             if (t.leaf()) drawLeaf(g, t);
             else drawFolder(g, t);
         }
+        g.restore();
     }
+
+    // screen -> layout(world) coordinates for hit-testing under the pan/zoom transform
+    private double toWorldX(double sx) { return (sx - panX) / zoom; }
+    private double toWorldY(double sy) { return (sy - panY) / zoom; }
+
+    private void clampPan() {
+        if (zoom <= 1.0) { panX = 0; panY = 0; return; }
+        double W = canvas.getWidth(), H = canvas.getHeight();
+        panX = Math.min(0, Math.max(W - W * zoom, panX));   // keep the scaled content covering the viewport
+        panY = Math.min(0, Math.max(H - H * zoom, panY));
+    }
+
+    private static double clamp(double v, double lo, double hi) { return v < lo ? lo : v > hi ? hi : v; }
 
     private void drawFolder(GraphicsContext g, Tile t) {
         double x = t.x() + GAP, y = t.y() + GAP, w = t.w() - GAP * 2, h = t.h() - GAP * 2;
