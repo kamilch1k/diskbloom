@@ -163,7 +163,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.20.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.21.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private final MenuButton recentMenu = new MenuButton("Recent"); // recently-scanned roots, reopen from cache

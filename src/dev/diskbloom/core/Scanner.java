@@ -5,10 +5,15 @@ import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.LinkOption;
 import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.RecursiveTask;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Walks a directory tree and aggregates sizes into a Node tree, children sorted
@@ -16,9 +21,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * under any UI. An optional Progress callback reports running totals during long
  * scans, and an AtomicBoolean allows cancellation.
  *
- * ponytail: single-threaded logical-size walk. Known ceilings, upgrade when they
- * bite: (1) speed -> parallel ForkJoin walk, then raw NTFS MFT read via FFI for
- * WizTree-class scans; (2) accuracy -> hardlink/junction dedup + on-disk size.
+ * Parallel ForkJoin walk with one stat (readAttributes) per entry — the two
+ * things that dominate Windows scan time. ponytail: next speed ceiling is a raw
+ * NTFS MFT read via FFI for WizTree-class scans; accuracy ceiling is
+ * hardlink/junction dedup + on-disk (allocated) size.
  */
 public final class Scanner {
 
@@ -43,9 +49,21 @@ public final class Scanner {
         return scan(root, null, null);
     }
 
-    /** Progress and cancel may be null. Returns null if cancelled before completion. */
+    /**
+     * Progress and cancel may be null. Returns null if cancelled before completion.
+     * Parallel: subdirectories are walked concurrently across a ForkJoin pool, and
+     * each entry's attributes are read in a single stat. Same result as a serial walk.
+     */
     public static Node scan(Path root, Progress progress, AtomicBoolean cancel) {
-        return new Walk(progress, cancel).run(root);
+        Counters c = new Counters(progress);
+        ForkJoinPool pool = new ForkJoinPool(Math.max(2, Runtime.getRuntime().availableProcessors()));
+        try {
+            return pool.invoke(new ScanTask(root, c, cancel));
+        } catch (CancellationException e) {
+            return null;
+        } finally {
+            pool.shutdownNow();
+        }
     }
 
     // ---- live browsing (no full recursion): for the Explorer-style file view ----
@@ -97,80 +115,90 @@ public final class Scanner {
     }
 
     private static void sumInto(Path p, long[] total) {
-        if (Files.isSymbolicLink(p)) return;
-        if (Files.isDirectory(p, LinkOption.NOFOLLOW_LINKS)) {
+        BasicFileAttributes a = readAttrs(p);
+        if (a == null || a.isSymbolicLink()) return;
+        if (a.isDirectory()) {
             try (DirectoryStream<Path> ds = Files.newDirectoryStream(p)) {
                 for (Path c : ds) sumInto(c, total);
             } catch (IOException | RuntimeException e) {
                 // unreadable dir -> counts as 0, keep going
             }
         } else {
-            try { total[0] += Files.size(p); } catch (IOException e) { /* skip */ }
+            total[0] += a.size();
         }
     }
 
-    private static final class Cancelled extends RuntimeException {}
+    /** One stat per entry — on Windows this is the scan's dominant cost, so read it once. */
+    private static BasicFileAttributes readAttrs(Path p) {
+        try { return Files.readAttributes(p, BasicFileAttributes.class, LinkOption.NOFOLLOW_LINKS); }
+        catch (IOException | RuntimeException e) { return null; }
+    }
 
-    private static final class Walk {
-        private final Progress progress;
-        private final AtomicBoolean cancel;
-        private long files, bytes, since;
-        private String currentDir = "";
+    // Shared running totals + throttled progress across all scan threads.
+    private static final class Counters {
+        final Progress progress;
+        final AtomicLong files = new AtomicLong(), bytes = new AtomicLong(), since = new AtomicLong();
+        volatile String currentDir = "";
+        Counters(Progress progress) { this.progress = progress; }
 
-        Walk(Progress progress, AtomicBoolean cancel) {
-            this.progress = progress;
-            this.cancel = cancel;
-        }
-
-        Node run(Path root) {
-            try {
-                return scan(root);
-            } catch (Cancelled c) {
-                return null;
+        void file(long size, String dir) {
+            long f = files.incrementAndGet();
+            long b = bytes.addAndGet(size);
+            if (since.incrementAndGet() >= 8192) {   // report roughly every 8k files, from whichever thread
+                since.set(0);
+                currentDir = dir;
+                if (progress != null) progress.update(f, b, dir);
             }
         }
+    }
 
-        private Node scan(Path path) {
-            if (cancel != null && cancel.get()) throw new Cancelled();
-            boolean isDir = Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS);
+    // Recursive parallel walk: fork a task per subdirectory, sum files inline.
+    private static final class ScanTask extends RecursiveTask<Node> {
+        private final Path path;
+        private final Counters c;
+        private final AtomicBoolean cancel;
+
+        ScanTask(Path path, Counters c, AtomicBoolean cancel) { this.path = path; this.c = c; this.cancel = cancel; }
+
+        @Override protected Node compute() {
+            if (cancel != null && cancel.get()) throw new CancellationException();
+            BasicFileAttributes at = readAttrs(path);
+            boolean isDir = at != null ? at.isDirectory() : Files.isDirectory(path, LinkOption.NOFOLLOW_LINKS);
             Node node = new Node(displayName(path), path, isDir);
             if (!isDir) {
-                node.size = fileSize(path);
+                long sz = at != null ? at.size() : 0;
+                node.size = sz;
+                c.file(sz, node.path.toString());
                 return node;
             }
-            currentDir = path.toString();
             node.children = new ArrayList<>();
+            List<ScanTask> forks = new ArrayList<>();
+            String dir = path.toString();
             try (DirectoryStream<Path> ds = Files.newDirectoryStream(path)) {
                 for (Path child : ds) {
-                    if (Files.isSymbolicLink(child)) continue; // skip links: avoids cycles + double counting
-                    Node c = scan(child);
-                    node.children.add(c);
-                    node.size += c.size;
+                    BasicFileAttributes a = readAttrs(child);
+                    if (a == null || a.isSymbolicLink()) continue;   // unreadable or link -> skip
+                    if (a.isDirectory()) {
+                        forks.add(new ScanTask(child, c, cancel));
+                    } else {
+                        Node fn = new Node(displayName(child), child, false);
+                        fn.size = a.size();
+                        node.children.add(fn);
+                        node.size += a.size();
+                        c.file(a.size(), dir);
+                    }
                 }
-            } catch (Cancelled c) {
-                throw c;
             } catch (IOException | RuntimeException e) {
-                // unreadable dir (usually perms) -> counts as 0 and we keep going
+                // unreadable dir (usually perms) -> counts as what we already gathered
+            }
+            for (ScanTask t : forks) t.fork();
+            for (ScanTask t : forks) {
+                Node cn = t.join();
+                node.children.add(cn);
+                node.size += cn.size;
             }
             node.children.sort(Comparator.comparingLong((Node n) -> n.size).reversed());
             return node;
-        }
-
-        private long fileSize(Path p) {
-            try {
-                long s = Files.size(p);
-                files++;
-                bytes += s;
-                if (++since >= 4096) report();
-                return s;
-            } catch (IOException e) {
-                return 0;
-            }
-        }
-
-        private void report() {
-            since = 0;
-            if (progress != null) progress.update(files, bytes, currentDir);
         }
     }
 
@@ -199,6 +227,27 @@ public final class Scanner {
         Files.delete(tmp.resolve("a.txt"));
         Files.delete(tmp.resolve("sub"));
         Files.delete(tmp);
+
+        // parallel walk must match the independent serial sum (sizeOf) on a deeper, wider tree
+        Path big = Files.createTempDirectory("dbscan-par");
+        long expected = 0;
+        for (int d = 0; d < 6; d++) {
+            Path sub = big.resolve("dir" + d);
+            Files.createDirectories(sub.resolve("nested"));
+            for (int f = 0; f < 5; f++) {
+                byte[] data = new byte[100 * (d + 1) + f];
+                Files.write(sub.resolve("f" + f + ".bin"), data);
+                Files.write(sub.resolve("nested").resolve("g" + f + ".bin"), data);
+                expected += 2L * data.length;
+            }
+        }
+        Node par = scan(big);
+        assert par.size == expected : "parallel scan size " + par.size + " != expected " + expected;
+        assert par.size == sizeOf(big) : "scan " + par.size + " != sizeOf " + sizeOf(big);
+        for (int i = 1; i < par.children.size(); i++)   // children sorted largest-first
+            assert par.children.get(i - 1).size >= par.children.get(i).size : "children not sorted largest-first";
+        Files.walk(big).sorted(Comparator.reverseOrder()).forEach(p -> { try { Files.delete(p); } catch (Exception ignore) { } });
+
         System.out.println("Scanner self-check OK");
     }
 
