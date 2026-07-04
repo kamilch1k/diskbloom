@@ -32,6 +32,8 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 - [x] Live file browser — address bar, drive picker, and lazy folder loading to navigate the whole PC, Explorer-style (right-click a folder to scan it or "Measure size" in place, or hit "Measure folders" to size every folder in the listing at once — something Explorer won't do)
 - [x] Search / filter — by name, extension (`.mp4`), or type (`type:video`); results shown largest-first
 - [x] Cleanup analyzer — the local LLM ranks your biggest files keep-vs-junk (weighing size and age) with reasons and cleaning advice; every suggested deletion is approval-gated, and a safety guard blocks system/`.git` paths
+- [x] "Analyze drive & optimize (AI)" — a one-click whole-drive optimization plan (biggest space users, ranked cleanup steps, likely caches/temp/duplicates), approval-gated like the rest
+- [x] Conversations & reports are saved locally — every chat/analysis is appended to `%LOCALAPPDATA%\diskbloom\history\chat-*.jsonl`; a "History" button opens that folder
 - [x] Duplicate finder — content-hash (SHA-256) detection of identical files across the scan; approve removing the redundant copies (one is always kept), safety-guarded and recoverable via the Recycle Bin
 - [x] Rule-based junk finder (no AI) — flags cache/build folders (`node_modules`, `__pycache__`, `.gradle`…), logs, temp files, thumbnail caches, and installers left in Downloads; same approval checklist and safety guard
 - [x] Modern flat dark theme, and a per-root scan cache — every drive/folder you've scanned is remembered and reopens instantly (drive buttons and Open folder reuse the cache; Rescan to refresh)

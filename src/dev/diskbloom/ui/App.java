@@ -163,7 +163,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.18.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.19.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private final MenuButton recentMenu = new MenuButton("Recent"); // recently-scanned roots, reopen from cache
@@ -178,6 +178,7 @@ public class App extends Application {
     private final VBox chatLog = new VBox(8);
     private ScrollPane chatScroll;
     private final List<Ollama.Msg> history = new ArrayList<>();
+    private Path historyFile;   // this chat session's on-disk log (JSONL), created on first message
     private javafx.scene.Node thinking;
     private final TextField questionField = new TextField();
     private final Button askBtn = new Button("Ask");
@@ -1387,9 +1388,13 @@ public class App extends Application {
         Button newChatBtn = new Button("New chat");
         newChatBtn.setStyle("-fx-font-size:11px;");
         newChatBtn.setOnAction(e -> newChat());
+        Button historyBtn = new Button("History");
+        historyBtn.setStyle("-fx-font-size:11px;");
+        historyBtn.setTooltip(new Tooltip("Open the folder where your conversations & reports are saved locally"));
+        historyBtn.setOnAction(e -> runQuietly(() -> { Files.createDirectories(historyDir()); Desktop.getDesktop().open(historyDir().toFile()); }));
         Region sp = new Region();
         HBox.setHgrow(sp, Priority.ALWAYS);
-        HBox titleRow = new HBox(8, title, sp, newChatBtn);
+        HBox titleRow = new HBox(8, title, sp, historyBtn, newChatBtn);
         titleRow.setAlignment(Pos.CENTER_LEFT);
         modelPicker.setMaxWidth(Double.MAX_VALUE);
 
@@ -1400,9 +1405,14 @@ public class App extends Application {
         VBox.setVgrow(chatScroll, Priority.ALWAYS);
 
         VBox presets = new VBox(6);
+        Button driveBtn = new Button("Analyze drive & optimize (AI)");
+        driveBtn.setMaxWidth(Double.MAX_VALUE);
+        driveBtn.getStyleClass().add("accent");
+        driveBtn.setOnAction(e -> analyzeDrive());
+        presets.getChildren().add(driveBtn);
         Button analyzeBtn = new Button("Analyze my biggest files");
         analyzeBtn.setMaxWidth(Double.MAX_VALUE);
-        analyzeBtn.getStyleClass().add("accent");
+        analyzeBtn.setStyle("-fx-font-size:11px;");
         analyzeBtn.setOnAction(e -> analyzeCleanup());
         presets.getChildren().add(analyzeBtn);
         Button junkBtn = new Button("Find junk files (no AI)");
@@ -1490,6 +1500,7 @@ public class App extends Application {
         if (model == null) { addBubble("assistant", "No model available — is Ollama running?"); return; }
         refreshContext();
         addBubble("user", display);
+        appendHistory("user", display);
         history.add(new Ollama.Msg("user", sent));
         questionField.clear();
         clearProposals();
@@ -1592,6 +1603,7 @@ public class App extends Application {
             }
         }
         history.add(new Ollama.Msg("assistant", text));
+        appendHistory("assistant", text);
         String p = prose.toString().strip();
         addBubble("assistant", p.isEmpty() ? "(suggested deletions below)" : p);
         List<Node> found = new ArrayList<>();
@@ -1631,9 +1643,40 @@ public class App extends Application {
 
     private void newChat() {
         history.clear();
+        historyFile = null;   // next message starts a fresh session log
         chatLog.getChildren().clear();
         clearProposals();
         addBubble("assistant", "Hi — ask what's using space, what's safe to delete, or anything about your files. I can suggest deletions for you to approve.");
+    }
+
+    // ---- local conversation history -------------------------------------
+
+    private static Path historyDir() { return diskbloomDir().resolve("history"); }
+
+    /** Append one message/report to this session's local JSONL log (nothing leaves the machine). */
+    private void appendHistory(String role, String text) {
+        try {
+            if (historyFile == null) {
+                Files.createDirectories(historyDir());
+                String stamp = new java.text.SimpleDateFormat("yyyyMMdd-HHmmss").format(new java.util.Date());
+                historyFile = historyDir().resolve("chat-" + stamp + ".jsonl");
+            }
+            String line = "{\"time\":" + System.currentTimeMillis()
+                    + ",\"role\":\"" + jsonEsc(role) + "\",\"text\":\"" + jsonEsc(text) + "\"}\n";
+            Files.writeString(historyFile, line, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (Exception ignore) { }
+    }
+
+    /** Whole-drive optimization analysis (broader than the biggest-files pass). */
+    private void analyzeDrive() {
+        Node root = stack.peekLast();
+        if (root == null) { addBubble("assistant", "Scan a drive or folder first, then I can analyze it."); return; }
+        String prompt = "Give me a prioritized, practical plan to optimize and free up space here, using the scan summary you have. "
+                + "Cover: (1) the biggest space users and whether each is safe to shrink; (2) cleanup steps ranked by space reclaimed vs risk; "
+                + "(3) likely caches, temp files, old downloads/installers, logs, or duplicates. "
+                + "For anything clearly safe to remove, add a line exactly: " + DELETE_TAG + " <full path>. "
+                + "Never suggest OS, system, program, or .git files. Keep it concise and skimmable.";
+        ask("Analyze this drive and recommend how to optimize it.", prompt);
     }
 
     private void refreshContext() {
