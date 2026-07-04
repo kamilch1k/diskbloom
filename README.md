@@ -37,7 +37,7 @@ diskbloom is aiming for all four on Windows — WizTree's speed, DaisyDisk's loo
 - [x] Duplicate finder — content-hash (SHA-256) detection of identical files across the scan, hashed in parallel across all cores with live progress; approve removing the redundant copies (one is always kept), safety-guarded and recoverable via the Recycle Bin
 - [x] Rule-based junk finder (no AI) — flags cache/build folders (`node_modules`, `__pycache__`, `.gradle`…), logs, temp files, thumbnail caches, and installers left in Downloads; same approval checklist and safety guard
 - [x] Modern flat dark theme, and a per-root scan cache — every drive/folder you've scanned is remembered and reopens instantly (drive buttons and Open folder reuse the cache; Rescan to refresh)
-- [x] Recent menu — reopen any previously scanned drive/folder in one click, straight from its cache (shows size and when it was scanned)
+- [x] Recent menu — reopen any previously scanned drive/folder in one click, straight from its cache (shows size and when it was scanned), or "Clear recent scans" to wipe the cache
 - [x] Keyboard shortcuts — Ctrl+O open, F5 rescan, Ctrl+F search, Ctrl+E export, Alt+← up a level, Esc to drop a search or leave an analysis view
 - [x] Start screen with an all-drives overview — each drive's used/total bar and free space, with a "cached" badge on drives that open instantly
 - [x] Single-instance (only one window at a time) and the version shown in the title bar and sidebar

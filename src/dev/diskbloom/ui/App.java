@@ -165,7 +165,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.23.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.24.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private final MenuButton recentMenu = new MenuButton("Recent"); // recently-scanned roots, reopen from cache
@@ -301,6 +301,16 @@ public class App extends Application {
         Files.deleteIfExists(cacheFileFor(r2));
         Files.delete(r1.resolve("f")); Files.delete(r1);
         Files.delete(r2.resolve("f")); Files.delete(r2);
+
+        // clear-cache: removes only *.bin, on the given dir (so the test never touches real caches)
+        Path cd = Files.createTempDirectory("dbclear");
+        Files.writeString(cd.resolve("a.bin"), "x");
+        Files.writeString(cd.resolve("b.bin"), "y");
+        Files.writeString(cd.resolve("keep.txt"), "z");
+        assert clearCacheFiles(cd) == 2 : "should clear 2 .bin files";
+        assert Files.exists(cd.resolve("keep.txt")) : "non-.bin files kept";
+        assert clearCacheFiles(cd) == 0 : "second clear removes nothing";
+        Files.delete(cd.resolve("keep.txt")); Files.delete(cd);
 
         System.out.println("App self-check OK");
     }
@@ -474,6 +484,37 @@ public class App extends Application {
             mi.setOnAction(a -> openOrScan(m.root()));   // cache hit -> opens instantly
             recentMenu.getItems().add(mi);
         }
+        recentMenu.getItems().add(new SeparatorMenuItem());
+        MenuItem clear = new MenuItem("Clear recent scans…");
+        clear.setOnAction(a -> clearRecent());
+        recentMenu.getItems().add(clear);
+    }
+
+    private void clearRecent() {
+        List<ScanCache.Meta> recents = recentRoots();
+        if (recents.isEmpty()) { status.setText("No cached scans to clear."); return; }
+        Alert a = new Alert(Alert.AlertType.CONFIRMATION,
+                "Clear " + recents.size() + " cached scan(s)? Those folders will be re-scanned next time you open them.",
+                ButtonType.OK, ButtonType.CANCEL);
+        a.setTitle("Clear recent scans");
+        a.setHeaderText(null);
+        Theme.apply(a.getDialogPane());
+        if (a.showAndWait().orElse(ButtonType.CANCEL) != ButtonType.OK) return;
+        int removed = clearCacheFiles(cacheDir());
+        try { Files.deleteIfExists(cacheFile()); } catch (Exception ignore) { }   // legacy single slot
+        status.setText("Cleared " + removed + " cached scan(s).");
+    }
+
+    /** Delete every *.bin cache file in a directory; returns the count removed. */
+    private static int clearCacheFiles(Path dir) {
+        if (!Files.isDirectory(dir)) return 0;
+        List<Path> files = new ArrayList<>();
+        try (var s = Files.newDirectoryStream(dir, "*.bin")) {
+            for (Path p : s) files.add(p);      // collect first — don't delete mid-iteration
+        } catch (Exception ignore) { return 0; }
+        int n = 0;
+        for (Path p : files) { try { Files.delete(p); n++; } catch (Exception ignore) { } }
+        return n;
     }
 
     // Headless hook: -Ddiskbloom.recent prints the recent-scans list and exits.
