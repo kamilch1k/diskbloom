@@ -56,6 +56,23 @@ public final class ScanCache {
         }
     }
 
+    public record Meta(Path root, long timestamp, long size) {}
+
+    /** Read just the header + root totals (no tree recursion) — cheap enough for a recent-scans list. */
+    public static Meta peek(Path file) {
+        if (!Files.exists(file)) return null;
+        try (DataInputStream in = new DataInputStream(new BufferedInputStream(Files.newInputStream(file)))) {
+            if (!MAGIC.equals(in.readUTF())) return null;
+            long ts = in.readLong();
+            Path root = Paths.get(in.readUTF());
+            in.readUTF();               // root node name (skip)
+            long size = in.readLong();  // root node aggregate size
+            return new Meta(root, ts, size);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     private static void writeNode(DataOutputStream out, Node node) throws IOException {
         out.writeUTF(node.name);
         out.writeLong(node.size);
@@ -115,6 +132,9 @@ public final class ScanCache {
             Node reSub = c.root().children.get(0);
             assert reSub.name.equals("sub") && reSub.children.get(0).size == 200 : "sub";
             assert reSub.children.get(0).path.toString().equals("C:\\x\\sub\\b.bin") : reSub.children.get(0).path.toString();
+            Meta m = peek(tmp);
+            assert m != null && m.timestamp() == 123L && m.size() == 300 : "peek header";
+            assert m.root().toString().equals("C:\\x") : "peek root path";
             System.out.println("scancache selfcheck OK");
         } finally {
             Files.deleteIfExists(tmp);

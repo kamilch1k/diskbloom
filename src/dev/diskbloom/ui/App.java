@@ -160,9 +160,10 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.15.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.16.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
+    private final MenuButton recentMenu = new MenuButton("Recent"); // recently-scanned roots, reopen from cache
     private boolean typesMode;                         // showing the file-type breakdown pane
     private ScrollPane typesPane;
     private static FileLock instanceLock;              // held for the process lifetime (single-instance guard)
@@ -270,6 +271,26 @@ public class App extends Application {
         Files.delete(cc.resolve("f.dat"));
         Files.delete(cc);
 
+        // recent scans: two seeded caches come back newest-first
+        Path r1 = Files.createTempDirectory("dbrec1");
+        Files.writeString(r1.resolve("f"), "aa");
+        Path r2 = Files.createTempDirectory("dbrec2");
+        Files.writeString(r2.resolve("f"), "bbb");
+        ScanCache.save(cacheFileFor(r1), Scanner.scan(r1), 1000L);
+        ScanCache.save(cacheFileFor(r2), Scanner.scan(r2), 2000L);   // newer
+        List<ScanCache.Meta> rec = recentRoots();
+        int i1 = -1, i2 = -1;
+        for (int i = 0; i < rec.size(); i++) {
+            String p = rec.get(i).root().toString();
+            if (p.equals(r1.toString())) i1 = i;
+            if (p.equals(r2.toString())) i2 = i;
+        }
+        assert i1 >= 0 && i2 >= 0 && i2 < i1 : "recent scans newest-first";
+        Files.deleteIfExists(cacheFileFor(r1));
+        Files.deleteIfExists(cacheFileFor(r2));
+        Files.delete(r1.resolve("f")); Files.delete(r1);
+        Files.delete(r2.resolve("f")); Files.delete(r2);
+
         System.out.println("App self-check OK");
     }
 
@@ -300,6 +321,7 @@ public class App extends Application {
         initAssistant();
         loadSettings();
 
+        if (System.getProperty("diskbloom.recent") != null) { runRecent(); return; }
         String browse = System.getProperty("diskbloom.browse");
         if (browse != null) { browseTo(Paths.get(browse)); if (shotPath != null) Platform.runLater(this::exportAndExit); return; }
         String measureDemo = System.getProperty("diskbloom.measuredemo");   // browse + measure child folders, for a shot
@@ -384,6 +406,47 @@ public class App extends Application {
         else scan(root);
     }
 
+    /** Every cached scan's root/size/time, newest first — for the Recent menu. */
+    private static List<ScanCache.Meta> recentRoots() {
+        Path dir = cacheDir();
+        List<ScanCache.Meta> out = new ArrayList<>();
+        if (Files.isDirectory(dir)) {
+            try (var s = Files.newDirectoryStream(dir, "*.bin")) {
+                for (Path p : s) { ScanCache.Meta m = ScanCache.peek(p); if (m != null) out.add(m); }
+            } catch (Exception ignore) { }
+        }
+        out.sort((a, b) -> Long.compare(b.timestamp(), a.timestamp()));
+        return out;
+    }
+
+    private void populateRecent() {
+        recentMenu.getItems().clear();
+        List<ScanCache.Meta> recents = recentRoots();
+        if (recents.isEmpty()) {
+            MenuItem none = new MenuItem("No recent scans yet");
+            none.setDisable(true);
+            recentMenu.getItems().add(none);
+            return;
+        }
+        int n = 0;
+        for (ScanCache.Meta m : recents) {
+            if (n++ >= 12) break;
+            String when = new java.text.SimpleDateFormat("MMM d, HH:mm").format(new java.util.Date(m.timestamp()));
+            MenuItem mi = new MenuItem(m.root() + "    ·  " + Sizes.human(m.size()) + "  ·  " + when);
+            mi.setOnAction(a -> openOrScan(m.root()));   // cache hit -> opens instantly
+            recentMenu.getItems().add(mi);
+        }
+    }
+
+    // Headless hook: -Ddiskbloom.recent prints the recent-scans list and exits.
+    private void runRecent() {
+        System.out.println("=== RECENT SCANS ===");
+        for (ScanCache.Meta m : recentRoots())
+            System.out.println(Sizes.human(m.size()) + "  "
+                    + new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm").format(new java.util.Date(m.timestamp())) + "  " + m.root());
+        Platform.exit();
+    }
+
     private static Path settingsFile() {
         String base = System.getenv("LOCALAPPDATA");
         Path dir = (base != null ? Paths.get(base) : Paths.get(System.getProperty("user.home"))).resolve("diskbloom");
@@ -410,7 +473,7 @@ public class App extends Application {
     /** True in the PNG-shot and headless test hooks — those skip the single-instance lock. */
     private boolean headlessMode() {
         if (shotPath != null) return true;
-        for (String k : new String[]{"selftest", "ask", "analyze", "dupes", "junk", "exportcsv"})
+        for (String k : new String[]{"selftest", "ask", "analyze", "dupes", "junk", "exportcsv", "recent"})
             if (System.getProperty("diskbloom." + k) != null) return true;
         return false;
     }
@@ -488,13 +551,14 @@ public class App extends Application {
         MenuItem miFolders = new MenuItem("Folders (normal view)");
         miFolders.setOnAction(e -> showFolders());
         viewsMenu.getItems().setAll(miBiggest, miBigOld, miTypes, new SeparatorMenuItem(), miFolders);
+        recentMenu.setOnShowing(e -> populateRecent());
         dupBtn.setOnAction(e -> findDuplicates());
         exportBtn.setOnAction(e -> chooseAndExport(stage));
         viewBtn.setOnAction(e -> toggleView());
         assistantBtn.setDisable(true);
         assistantBtn.setOnAction(e -> toggleAssistant());
         settingsBtn.setOnAction(e -> showSettings());
-        HBox bar = new HBox(10, open, rescanBtn, upBtn, viewsMenu, dupBtn, exportBtn, viewBtn, crumb, assistantBtn, settingsBtn);
+        HBox bar = new HBox(10, open, rescanBtn, recentMenu, upBtn, viewsMenu, dupBtn, exportBtn, viewBtn, crumb, assistantBtn, settingsBtn);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(8, 12, 8, 12));
         bar.setStyle("-fx-background-color:#2b2b2b; -fx-border-color:" + LINE + "; -fx-border-width:0 0 1 0;");
