@@ -163,7 +163,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.21.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.22.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private final MenuButton recentMenu = new MenuButton("Recent"); // recently-scanned roots, reopen from cache
@@ -230,8 +230,10 @@ public class App extends Application {
         Files.writeString(d.resolve("a.txt"), "same-content-here");
         Files.writeString(d.resolve("b.txt"), "same-content-here");
         Files.writeString(d.resolve("c.txt"), "different-content");
-        List<List<Node>> g = findDupes(Scanner.scan(d));
+        int[] prog = {0, 0};
+        List<List<Node>> g = findDupes(Scanner.scan(d), (h, t) -> { prog[0] = h; prog[1] = t; });
         assert g.size() == 1 && g.get(0).size() == 2 : "expected one duplicate pair, got " + g;
+        assert prog[1] == 3 && prog[0] == 3 : "dup progress should reach 3/3 (all same-size), got " + prog[0] + "/" + prog[1];
         for (String f : new String[]{"a.txt", "b.txt", "c.txt"}) Files.delete(d.resolve(f));
         Files.delete(d);
 
@@ -2134,7 +2136,10 @@ public class App extends Application {
         status.setText("Finding duplicate files (hashing same-size files)…");
         dupBtn.setDisable(true);
         Task<List<List<Node>>> task = new Task<>() {
-            @Override protected List<List<Node>> call() { return findDupes(root); }
+            @Override protected List<List<Node>> call() {
+                return findDupes(root, (h, t) -> Platform.runLater(() ->
+                        status.setText("Hashing files for duplicates…  " + h + " / " + t)));
+            }
         };
         task.setOnSucceeded(e -> { dupBtn.setDisable(false); showDuplicates(task.getValue()); });
         task.setOnFailed(e -> { dupBtn.setDisable(false); status.setText("Duplicate scan failed: " + task.getException()); });
@@ -2168,17 +2173,25 @@ public class App extends Application {
         status.setText(groups.size() + " duplicate set(s)  ·  " + Sizes.human(wasted) + " reclaimable  ·  approve below");
     }
 
+    interface DupProgress { void update(int hashed, int total); }
+
+    private static List<List<Node>> findDupes(Node root) { return findDupes(root, null); }
+
     /** Group identical files (same size AND same SHA-256). Each returned group has >= 2 files. */
-    private static List<List<Node>> findDupes(Node root) {
+    private static List<List<Node>> findDupes(Node root, DupProgress progress) {
         Map<Long, List<Node>> bySize = new HashMap<>();
         collectBySize(root, bySize);
+        int total = 0;                                          // only same-size files ever get hashed
+        for (List<Node> g : bySize.values()) if (g.size() >= 2) total += g.size();
         List<List<Node>> groups = new ArrayList<>();
+        int hashed = 0;
         for (List<Node> sameSize : bySize.values()) {
             if (sameSize.size() < 2) continue;                 // unique size -> can't be a duplicate
             Map<String, List<Node>> byHash = new HashMap<>();
             for (Node n : sameSize) {
                 String h = sha256(n.path);
                 if (h != null) byHash.computeIfAbsent(h, k -> new ArrayList<>()).add(n);
+                if (progress != null && (++hashed % 64 == 0 || hashed == total)) progress.update(hashed, total);
             }
             for (List<Node> g : byHash.values()) if (g.size() >= 2) groups.add(g);
         }
@@ -2211,7 +2224,7 @@ public class App extends Application {
         Node root = stack.peekLast();
         if (root == null) { Platform.exit(); return; }
         new Thread(() -> {
-            List<List<Node>> groups = findDupes(root);
+            List<List<Node>> groups = findDupes(root, (h, t) -> { if (h == t) System.out.println("hashed " + h + " same-size file(s)"); });
             long wasted = 0;
             System.out.println("=== DUPLICATES in " + root.path + " ===");
             for (List<Node> g : groups) {
