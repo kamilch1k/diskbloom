@@ -86,7 +86,9 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * The diskbloom window: scans a folder off the UI thread (with a live progress
@@ -163,7 +165,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.22.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.23.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private final MenuButton recentMenu = new MenuButton("Recent"); // recently-scanned roots, reopen from cache
@@ -2181,17 +2183,29 @@ public class App extends Application {
     private static List<List<Node>> findDupes(Node root, DupProgress progress) {
         Map<Long, List<Node>> bySize = new HashMap<>();
         collectBySize(root, bySize);
-        int total = 0;                                          // only same-size files ever get hashed
-        for (List<Node> g : bySize.values()) if (g.size() >= 2) total += g.size();
+        List<Node> candidates = new ArrayList<>();              // only files in a same-size group can be dupes
+        for (List<Node> g : bySize.values()) if (g.size() >= 2) candidates.addAll(g);
+        int total = candidates.size();
+        if (total == 0) return List.of();
+
+        // Hash the candidates in parallel across all cores — SHA-256 is CPU-bound, so this scales well.
+        AtomicInteger done = new AtomicInteger();
+        Map<Node, String> hashes = new ConcurrentHashMap<>();
+        candidates.parallelStream().forEach(n -> {
+            String h = sha256(n.path);
+            if (h != null) hashes.put(n, h);
+            int c = done.incrementAndGet();
+            if (progress != null && (c % 64 == 0 || c == total)) progress.update(c, total);
+        });
+
+        // Group serially from the precomputed hashes — same result and order as the old serial pass.
         List<List<Node>> groups = new ArrayList<>();
-        int hashed = 0;
         for (List<Node> sameSize : bySize.values()) {
-            if (sameSize.size() < 2) continue;                 // unique size -> can't be a duplicate
+            if (sameSize.size() < 2) continue;
             Map<String, List<Node>> byHash = new HashMap<>();
             for (Node n : sameSize) {
-                String h = sha256(n.path);
+                String h = hashes.get(n);
                 if (h != null) byHash.computeIfAbsent(h, k -> new ArrayList<>()).add(n);
-                if (progress != null && (++hashed % 64 == 0 || hashed == total)) progress.update(hashed, total);
             }
             for (List<Node> g : byHash.values()) if (g.size() >= 2) groups.add(g);
         }
