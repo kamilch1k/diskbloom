@@ -163,7 +163,7 @@ public class App extends Application {
     private final Button dupBtn = new Button("Duplicates");
     private final Button settingsBtn = new Button("Settings");
 
-    static final String VERSION = "0.17.0";           // shown in the title bar + sidebar; bump per release
+    static final String VERSION = "0.18.0";           // shown in the title bar + sidebar; bump per release
     private final Button exportBtn = new Button("Export");
     private final MenuButton viewsMenu = new MenuButton("Views");   // Biggest / Big & old / File types
     private final MenuButton recentMenu = new MenuButton("Recent"); // recently-scanned roots, reopen from cache
@@ -321,8 +321,8 @@ public class App extends Application {
         stage.show();
 
         assistantPanel = buildAssistantPanel();
+        loadSettings();          // applies the saved Ollama endpoint before we probe it
         initAssistant();
-        loadSettings();
         registerShortcuts(stage);
 
         if (System.getProperty("diskbloom.accels") != null) { printAccels(); return; }
@@ -488,11 +488,14 @@ public class App extends Application {
         Path f = settingsFile();
         if (Files.exists(f)) { try (var r = Files.newBufferedReader(f)) { p.load(r); } catch (Exception ignore) { } }
         autoScan = Boolean.parseBoolean(p.getProperty("autoScan", "false"));
+        String url = p.getProperty("ollamaUrl");
+        if (url != null && !url.isBlank()) Ollama.setBase(url);
     }
 
     private void saveSettings() {
         Properties p = new Properties();
         p.setProperty("autoScan", String.valueOf(autoScan));
+        p.setProperty("ollamaUrl", Ollama.getBase());
         Path f = settingsFile();
         try {
             Files.createDirectories(f.getParent());
@@ -526,12 +529,41 @@ public class App extends Application {
     private void showSettings() {
         CheckBox auto = new CheckBox("Scan automatically on launch");
         auto.setSelected(autoScan);
-        Label note = new Label("When off, diskbloom opens to a start screen (or your last cached scan) and only scans when you ask.");
-        note.setWrapText(true);
-        note.setMaxWidth(360);
-        note.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px;");
-        VBox content = new VBox(10, auto, note);
+        Label autoNote = new Label("When off, diskbloom opens to a start screen (or your last cached scan) and only scans when you ask.");
+        autoNote.setWrapText(true); autoNote.setMaxWidth(380);
+        autoNote.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px;");
+
+        Region sep = new Region(); sep.setPrefHeight(1); sep.setStyle("-fx-background-color:" + LINE + ";");
+
+        Label aiLabel = new Label("AI server (Ollama)");
+        aiLabel.setStyle("-fx-text-fill:" + FG + "; -fx-font-size:12px; -fx-font-weight:bold;");
+        TextField aiUrl = new TextField(Ollama.getBase());
+        HBox.setHgrow(aiUrl, Priority.ALWAYS);
+        Button test = new Button("Test / auto-detect");
+        Label aiStatus = new Label("");
+        aiStatus.setWrapText(true); aiStatus.setMaxWidth(380);
+        aiStatus.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px;");
+        test.setOnAction(e -> {
+            String typed = aiUrl.getText();
+            aiStatus.setText("Checking…");
+            new Thread(() -> {
+                if (typed != null && !typed.isBlank()) Ollama.setBase(typed);
+                List<String> m = Ollama.autodetect();
+                Platform.runLater(() -> {
+                    aiUrl.setText(Ollama.getBase());
+                    aiStatus.setText(m.isEmpty()
+                            ? "No Ollama server found. Is it running? Install from ollama.com, then Test again."
+                            : "Connected — " + m.size() + " model(s) at " + Ollama.getBase());
+                });
+            }, "ollama-test").start();
+        });
+        Label aiNote = new Label("The assistant runs a local model via Ollama (default http://localhost:11434). Nothing leaves your PC.");
+        aiNote.setWrapText(true); aiNote.setMaxWidth(380);
+        aiNote.setStyle("-fx-text-fill:" + DIM + "; -fx-font-size:11px;");
+
+        VBox content = new VBox(10, auto, autoNote, sep, aiLabel, new HBox(6, aiUrl, test), aiStatus, aiNote);
         content.setPadding(new Insets(6, 4, 4, 4));
+        content.setPrefWidth(400);
 
         Dialog<Void> d = new Dialog<>();
         d.setTitle("Settings");
@@ -540,8 +572,11 @@ public class App extends Application {
         d.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
         Theme.apply(d.getDialogPane());
         d.showAndWait();
+
         autoScan = auto.isSelected();
+        Ollama.setBase(aiUrl.getText());
         saveSettings();
+        initAssistant();   // re-probe with the (possibly changed) endpoint
     }
 
     private void showCached(ScanCache.Cached cached) {
@@ -1417,17 +1452,18 @@ public class App extends Application {
 
     private void initAssistant() {
         Thread t = new Thread(() -> {
-            List<String> ms;
-            try { ms = Ollama.models(); } catch (Exception e) { ms = List.of(); }
+            List<String> ms = Ollama.autodetect();   // try the configured endpoint, then common local ones
             final List<String> models = ms;
             Platform.runLater(() -> {
                 if (models.isEmpty()) {
                     assistantBtn.setDisable(true);
-                    assistantBtn.setTooltip(new Tooltip("Start Ollama (localhost:11434) to enable the assistant"));
+                    assistantBtn.setTooltip(new Tooltip("No Ollama server found at " + Ollama.getBase()
+                            + ". Start Ollama, or set the address in Settings."));
                 } else {
                     modelPicker.getItems().setAll(models);
                     modelPicker.getSelectionModel().select(models.contains("qwen2.5:14b") ? "qwen2.5:14b" : models.get(0));
                     assistantBtn.setDisable(false);
+                    assistantBtn.setTooltip(new Tooltip("Local AI assistant — " + models.size() + " model(s) at " + Ollama.getBase()));
                 }
             });
         }, "ollama-check");
